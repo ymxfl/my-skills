@@ -19,13 +19,17 @@
  *   node douyin_to_feishu.js --full --url "<抖音链接>" --title "标题"
  *
  * 用法（分步）：
+ *   分步执行时必须通过 --work-dir 指定同一工作目录，确保各步共享中间文件。
+ *   工作目录会在首次运行时自动创建，无需提前 mkdir。
+ *
+ *   WORK=/tmp/douyin_task_20260329
  *   node douyin_to_feishu.js --step check
- *   node douyin_to_feishu.js --step download   --url "<链接>"
- *   node douyin_to_feishu.js --step transcribe --video /tmp/douyin_task/video.mp4
- *   node douyin_to_feishu.js --step analyze    --segments /tmp/douyin_task/segments.json
- *   node douyin_to_feishu.js --step write-paragraphs --data '<JSON>'
- *   node douyin_to_feishu.js --step frames     --video /tmp/douyin_task/video.mp4
- *   node douyin_to_feishu.js --step write      --title "标题"
+ *   node douyin_to_feishu.js --step download   --url "<链接>"          --work-dir $WORK
+ *   node douyin_to_feishu.js --step transcribe                         --work-dir $WORK
+ *   node douyin_to_feishu.js --step analyze                            --work-dir $WORK
+ *   node douyin_to_feishu.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
+ *   node douyin_to_feishu.js --step frames                             --work-dir $WORK
+ *   node douyin_to_feishu.js --step write      --title "标题"          --work-dir $WORK
  *
  * 凭证（优先级从高到低）：
  *   1. 命令行参数：--app-id cli_xxx --app-secret xxx
@@ -66,12 +70,18 @@ const OPENAI_KEY    = process.env.OPENAI_API_KEY || dotenv.OPENAI_API_KEY;
 const STEP          = getArg('--step');
 const IS_FULL       = hasFlag('--full');
 const DOUYIN_URL    = getArg('--url');
-const VIDEO_PATH    = getArg('--video',        '/tmp/douyin_task/video.mp4');
-const SEGMENTS_PATH = getArg('--segments',     '/tmp/douyin_task/segments.json');
-const PARAGRAPHS_PATH = getArg('--paragraphs', '/tmp/douyin_task/paragraphs.json');
-const FRAMES_DIR    = getArg('--frames',        '/tmp/douyin_task/frames');
 const DOC_TITLE     = getArg('--title',         '抖音视频文案');
-const WORK_DIR      = '/tmp/douyin_task';
+
+// 工作目录：优先用 --work-dir 参数（方便分步执行时共享同一目录）；
+// 否则生成带时间戳的唯一目录，避免多任务并发或重复安装时互相覆盖。
+// 注意：分步执行时，请在每步都传相同的 --work-dir，或使用 --full 全流程。
+const _ts           = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14); // e.g. 20260329025500
+const WORK_DIR      = getArg('--work-dir', `/tmp/douyin_task_${_ts}`);
+
+const VIDEO_PATH    = getArg('--video',        path.join(WORK_DIR, 'video.mp4'));
+const SEGMENTS_PATH = getArg('--segments',     path.join(WORK_DIR, 'segments.json'));
+const PARAGRAPHS_PATH = getArg('--paragraphs', path.join(WORK_DIR, 'paragraphs.json'));
+const FRAMES_DIR    = getArg('--frames',        path.join(WORK_DIR, 'frames'));
 
 // douyin_parser.py 所在目录（和本脚本同目录）
 const SCRIPTS_DIR   = path.dirname(path.resolve(__filename));
@@ -1143,40 +1153,43 @@ async function main() {
 
   } else {
     console.log(`
-抖音视频 → 飞书文档 v4.1（内置下载器 + 依赖检测 + 多维表格记录版）
+抖音视频 → 飞书文档 v4.2（内置下载器 + 依赖检测 + 多维表格记录版）
 
 环境检测（推荐先运行）：
   node douyin_to_feishu.js --step check
 
 流程（推荐按顺序执行）：
+  分步执行时，请通过 --work-dir 指定同一工作目录（或直接使用 --full 全流程）。
+  工作目录示例：WORK=/tmp/douyin_task_20260329
+
   1. 下载视频（使用内置 douyin_parser，无水印）
-     node douyin_to_feishu.js --step download --url "<抖音链接>"
+     node douyin_to_feishu.js --step download --url "<抖音链接>" --work-dir $WORK
 
   2. 本地 Whisper 转录（带时间戳）
-     node douyin_to_feishu.js --step transcribe --video /tmp/douyin_task/video.mp4
+     node douyin_to_feishu.js --step transcribe --work-dir $WORK
      → 优先用本地 whisper，无则回退到 OpenAI Whisper API
      → 输出 segments.json（每句话的时间范围和文案）
 
   3. AI 语义分析（由主 AI 直接完成，不调用外部 LLM）
-     node douyin_to_feishu.js --step analyze --segments /tmp/douyin_task/segments.json
+     node douyin_to_feishu.js --step analyze --work-dir $WORK
      → 打印转录全文，由主 AI 阅读后决定段落划分和截图时间点
      → 主 AI 直接写入 paragraphs.json：
-       先用文件写工具写入 /tmp/douyin_task/paragraphs.json
-       再执行：node douyin_to_feishu.js --step write-paragraphs --file /tmp/douyin_task/paragraphs.json
+       先用文件写工具写入 $WORK/paragraphs.json
+       再执行：node douyin_to_feishu.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
 
   4. 精准截帧（按 AI 指定时间点）
-     node douyin_to_feishu.js --step frames --video /tmp/douyin_task/video.mp4
+     node douyin_to_feishu.js --step frames --work-dir $WORK
 
   4.5 [可选] AI 文字优化（修正转录错误）
-     node douyin_to_feishu.js --step polish
+     node douyin_to_feishu.js --step polish --work-dir $WORK
      → 打印段落文案，由主 AI 修正 Whisper 同音字、专有名词错误、错别字
      → 主 AI 将修改后的 paragraphs.json 写回原路径
 
   5. 写入飞书文档（完成后自动记录到多维表格，如已配置）
-     node douyin_to_feishu.js --step write --title "视频标题"
+     node douyin_to_feishu.js --step write --title "视频标题" --work-dir $WORK
 
   6. [可选] 单独记录到多维表格
-     node douyin_to_feishu.js --step log \\
+     node douyin_to_feishu.js --step log --work-dir $WORK \\
        --bitable-token <app_token> --bitable-table <table_id> \\
        --doc-url "https://my.feishu.cn/docx/xxx" \\
        --source-url "https://v.douyin.com/xxx" \\
