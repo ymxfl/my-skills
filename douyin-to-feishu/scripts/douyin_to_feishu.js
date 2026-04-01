@@ -52,13 +52,23 @@ function getArg(name, defaultVal = null) {
 }
 function hasFlag(name) { return args.includes(name); }
 
+// douyin_parser.py 所在目录（和本脚本同目录）；需在 loadDotEnv 之前定义以便读取 skill 根目录 .env
+const SCRIPTS_DIR   = path.dirname(path.resolve(__filename));
+const SKILL_ROOT    = path.dirname(SCRIPTS_DIR);
+
+/**
+ * 读取 .env：先 skill 根目录（与 SKILL.md 同级），再 cwd；后者覆盖前者。
+ * 这样无论从仓库哪一级执行 node scripts/douyin_to_feishu.js，都能加载凭证。
+ */
 function loadDotEnv() {
-  const p = path.join(process.cwd(), '.env');
-  if (!fs.existsSync(p)) return {};
+  const paths = [path.join(SKILL_ROOT, '.env'), path.join(process.cwd(), '.env')];
   const env = {};
-  for (const line of fs.readFileSync(p, 'utf-8').split('\n')) {
-    const m = line.match(/^\s*([^#=]+?)\s*=\s*(.*)\s*$/);
-    if (m) env[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
+  for (const p of paths) {
+    if (!fs.existsSync(p)) continue;
+    for (const line of fs.readFileSync(p, 'utf-8').split('\n')) {
+      const m = line.match(/^\s*([^#=]+?)\s*=\s*(.*)\s*$/);
+      if (m) env[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
+    }
   }
   return env;
 }
@@ -83,9 +93,6 @@ const SEGMENTS_PATH = getArg('--segments',     path.join(WORK_DIR, 'segments.jso
 const PARAGRAPHS_PATH = getArg('--paragraphs', path.join(WORK_DIR, 'paragraphs.json'));
 const FRAMES_DIR    = getArg('--frames',        path.join(WORK_DIR, 'frames'));
 
-// douyin_parser.py 所在目录（和本脚本同目录）
-const SCRIPTS_DIR   = path.dirname(path.resolve(__filename));
-
 // ══════════════════════════════════════
 //  依赖检测
 // ══════════════════════════════════════
@@ -98,6 +105,18 @@ const SCRIPTS_DIR   = path.dirname(path.resolve(__filename));
 function commandExists(cmd) {
   try {
     execSync(`which ${cmd}`, { stdio: 'pipe' });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function pythonModuleExists(moduleName) {
+  try {
+    const cmd = moduleName === 'faster_whisper'
+      ? `KMP_DUPLICATE_LIB_OK=TRUE python3 -c "import ${moduleName}"`
+      : `python3 -c "import ${moduleName}"`;
+    execSync(cmd, { stdio: 'pipe' });
     return true;
   } catch {
     return false;
@@ -158,18 +177,22 @@ function checkDependencies(strict = true) {
   }
 
   // ── 转录依赖（二选一）──────────────────────────────
+  const hasFasterWhisper = commandExists('python3') && pythonModuleExists('faster_whisper');
   const hasLocalWhisper = commandExists('whisper');
   const hasOpenAIKey    = !!(OPENAI_KEY);
 
-  if (hasLocalWhisper) {
+  if (hasFasterWhisper) {
+    console.log('  ✅ faster-whisper（本地）  已安装');
+  } else if (hasLocalWhisper) {
     const v = (() => { try { return execSync('whisper --version 2>&1', { stdio: 'pipe' }).toString().trim().split('\n')[0]; } catch { return ''; } })();
-    console.log(`  ✅ whisper（本地）  ${v}`);
+    console.log(`  ⚠️  faster-whisper 未安装，检测到 whisper（本地）  ${v}`);
+    optional.push('faster-whisper');
   } else if (hasOpenAIKey) {
-    console.log('  ⚠️  本地 whisper 未安装，将使用 OpenAI Whisper API（需联网）');
-    optional.push('whisper');
+    console.log('  ⚠️  本地 faster-whisper/whisper 未安装，将使用 OpenAI Whisper API（需联网）');
+    optional.push('faster-whisper');
   } else {
-    missing.push('whisper（本地）或 OPENAI_API_KEY');
-    console.log('  ❌ whisper  未安装，且未配置 OPENAI_API_KEY');
+    missing.push('faster-whisper（本地）或 OPENAI_API_KEY');
+    console.log('  ❌ faster-whisper  未安装，且未配置 OPENAI_API_KEY');
   }
 
   // ── 打印汇总 ───────────────────────────────────────
@@ -195,9 +218,9 @@ function checkDependencies(strict = true) {
       console.log('  【requests】Python HTTP 库（抖音视频下载依赖）');
       console.log('    pip3 install requests\n');
     }
-    if (missing.some(m => m.startsWith('whisper'))) {
-      console.log('  【openai-whisper】本地语音转文字（推荐）');
-      console.log('    pip3 install openai-whisper');
+    if (missing.some(m => m.startsWith('faster-whisper'))) {
+      console.log('  【faster-whisper】本地语音转文字（推荐）');
+      console.log('    pip3 install faster-whisper');
       console.log('  或者：配置 OpenAI API Key（在线 Whisper API）');
       console.log('    export OPENAI_API_KEY=sk-xxxxxxxx\n');
     }
@@ -237,7 +260,7 @@ function checkFeishuCredentials() {
   export FEISHU_APP_SECRET=your_app_secret
 
 【方式 C】写入 .env 文件（永久）
-  在当前目录创建 .env 文件，内容：
+  在 skill 根目录（与 SKILL.md 同级）或当前工作目录创建 .env（两处都有时后者优先），内容：
     FEISHU_APP_ID=cli_xxxxxxxxxxxxxxxx
     FEISHU_APP_SECRET=your_app_secret
 
@@ -339,6 +362,33 @@ const P  = (t, docId, text) => addBlock(t, docId, { block_type: 2, text: { eleme
 const H1 = (t, docId, text) => addBlock(t, docId, { block_type: 3, heading1: { elements: parseBold(text) } });
 const BR = (t, docId) => P(t, docId, ' ');
 
+/**
+ * 以 Markdown 语义写入飞书文档（当前支持：#、##、普通段落、空行）。
+ * 这里不依赖飞书 Markdown convert 接口，避免权限/兼容性差异导致失败。
+ */
+async function writeMarkdown(token, docId, markdown) {
+  const lines = String(markdown || '').replace(/\r\n/g, '\n').split('\n');
+  for (const raw of lines) {
+    const line = raw.trimEnd();
+    if (!line.trim()) {
+      await BR(token, docId);
+      continue;
+    }
+    if (line.startsWith('# ')) {
+      await H1(token, docId, line.slice(2).trim());
+      continue;
+    }
+    if (line.startsWith('## ')) {
+      await addBlock(token, docId, {
+        block_type: 4,
+        heading2: { elements: parseBold(line.slice(3).trim()) }
+      });
+      continue;
+    }
+    await P(token, docId, line);
+  }
+}
+
 async function IMG(token, docId, imgPath) {
   // step1: 创建空图片块
   const r1 = await addBlock(token, docId, { block_type: 27, image: {} });
@@ -390,8 +440,12 @@ function stepCheck() {
   } else {
     if (!APP_ID) console.log('  ❌ FEISHU_APP_ID     未配置');
     if (!APP_SECRET) console.log('  ❌ FEISHU_APP_SECRET 未配置');
+    console.log('\n  ℹ️  若在 ~/.zshrc 里已写但仍显示未配置，常见原因：');
+    console.log('     1) 须用 export（仅 FEISHU_APP_ID=… 不会传给子进程）');
+    console.log('     2) Node 只继承「启动它的进程」的环境；Cursor Agent / 非交互 shell 往往不执行 .zshrc');
+    console.log('     3) 可把变量放到 ~/.zshenv，或本 skill 根目录的 .env（脚本会自动读取）');
     console.log('\n  → 在对话中告知 AI："我的飞书 App ID 是 cli_xxx，App Secret 是 yyy"');
-    console.log('  → 或设置环境变量：export FEISHU_APP_ID=cli_xxx');
+    console.log('  → 或在本终端执行：export FEISHU_APP_ID=cli_xxx（再运行脚本）');
   }
 
   console.log('\n── OpenAI 配置状态 ──');
@@ -461,10 +515,12 @@ print("[下载] 视频标题:", info['desc'][:60])
 saved = download_video(info, output_path=out_name, output_dir=out_dir, verbose=True)
 print("SAVED_PATH:" + saved)
 
-# 输出视频元数据，供主脚本使用
+# 输出视频元数据，供主脚本使用（duration 在 douyin_parser 中为毫秒，此处转为秒）
+_ms = int(info.get('duration', 0) or info.get('video', {}).get('duration', 0) or 0)
+_sec = round(_ms / 1000.0, 2) if _ms else 0
 print("VIDEO_TITLE:" + info['desc'][:80])
 print("VIDEO_AUTHOR:" + str(info.get('author', {}).get('nickname', '') if isinstance(info.get('author'), dict) else info.get('author', '')))
-print("VIDEO_DURATION:" + str(info.get('duration', 0) or info.get('video', {}).get('duration', 0) or 0))
+print("VIDEO_DURATION:" + str(_sec))
 print("VIDEO_URL:" + url)
 `;
   fs.writeFileSync(tmpScript, pyCode, 'utf-8');
@@ -505,13 +561,13 @@ print("VIDEO_URL:" + url)
   // 提取视频元数据，写入工作目录
   const titleMatch    = output.match(/VIDEO_TITLE:(.+)/);
   const authorMatch   = output.match(/VIDEO_AUTHOR:(.+)/);
-  const durationMatch = output.match(/VIDEO_DURATION:(\d+)/);
+  const durationMatch = output.match(/VIDEO_DURATION:([\d.]+)/);
   const urlMatch      = output.match(/VIDEO_URL:(.+)/);
 
   const meta = {
     title:    (titleMatch    ? titleMatch[1].trim()    : '') || DOC_TITLE,
     author:   (authorMatch   ? authorMatch[1].trim()   : ''),
-    duration: (durationMatch ? parseInt(durationMatch[1]) : 0),
+    duration: (durationMatch ? parseFloat(durationMatch[1]) : 0),
     url:      (urlMatch      ? urlMatch[1].trim()      : url),
   };
 
@@ -519,7 +575,7 @@ print("VIDEO_URL:" + url)
   fs.writeFileSync(path.join(WORK_DIR, 'video_meta.json'), JSON.stringify(meta, null, 2), 'utf-8');
   console.log('  📝 视频标题：', meta.title);
   if (meta.author)   console.log('  👤 作者：', meta.author);
-  if (meta.duration) console.log('  ⏱️  时长：', meta.duration, '秒');
+  if (meta.duration) console.log('  ⏱️  时长：', Number.isInteger(meta.duration) ? meta.duration : meta.duration.toFixed(1), '秒');
 
   return VIDEO_PATH;
 }
@@ -543,10 +599,57 @@ async function stepTranscribe(videoPath) {
 
   let segments = [];
 
-  // 优先使用本地 whisper（精准、无网络依赖）
+  // 优先使用 faster-whisper（更快更省内存）
+  const hasFasterWhisper = commandExists('python3') && pythonModuleExists('faster_whisper');
   const localWhisper = commandExists('whisper');
 
-  if (localWhisper) {
+  if (hasFasterWhisper) {
+    console.log('  使用本地 faster-whisper 转录（small 模型，中文）...');
+    const tmpScript = path.join(WORK_DIR, '_fw_transcribe.py');
+    try {
+      const jsonPath = path.join(WORK_DIR, path.basename(audioPath, '.mp3') + '.json');
+      const pyCode = `
+import json
+from faster_whisper import WhisperModel
+
+audio_path = ${JSON.stringify(audioPath)}
+json_path = ${JSON.stringify(jsonPath)}
+
+model = WhisperModel("small", device="cpu", compute_type="int8")
+segments, _ = model.transcribe(audio_path, language="zh", vad_filter=True, beam_size=5)
+data = {"segments": []}
+for s in segments:
+    text = (s.text or "").strip()
+    if not text:
+        continue
+    data["segments"].append({
+        "start": round(float(s.start), 2),
+        "end": round(float(s.end), 2),
+        "text": text
+    })
+
+with open(json_path, "w", encoding="utf-8") as f:
+    json.dump(data, f, ensure_ascii=False, indent=2)
+`;
+      fs.writeFileSync(tmpScript, pyCode, 'utf-8');
+      run(`KMP_DUPLICATE_LIB_OK=TRUE python3 "${tmpScript}"`);
+      if (!fs.existsSync(jsonPath)) throw new Error('未找到输出 JSON: ' + jsonPath);
+      const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+      segments = (result.segments || []).map(s => ({
+        start: parseFloat(s.start.toFixed(2)),
+        end:   parseFloat(s.end.toFixed(2)),
+        text:  s.text.trim()
+      })).filter(s => s.text.length > 0);
+      console.log(`✅ faster-whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
+    } catch (e) {
+      console.warn('⚠️  faster-whisper 转录失败，尝试回退到 whisper CLI：', e.message);
+    } finally {
+      try { fs.unlinkSync(tmpScript); } catch {}
+    }
+  }
+
+  // 回退：本地 whisper CLI
+  if (segments.length === 0 && localWhisper) {
     console.log('  使用本地 whisper 转录（small 模型，中文）...');
     try {
       const whisperCmd = `KMP_DUPLICATE_LIB_OK=TRUE whisper "${audioPath}" --model small --language zh --output_format json --output_dir "${WORK_DIR}"`;
@@ -559,14 +662,16 @@ async function stepTranscribe(videoPath) {
         end:   parseFloat(s.end.toFixed(2)),
         text:  s.text.trim()
       })).filter(s => s.text.length > 0);
-      console.log(`✅ 本地转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
+      console.log(`✅ 本地 whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
     } catch (e) {
-      console.error('❌ 本地 whisper 失败:', e.message);
-      process.exit(1);
+      console.warn('⚠️  本地 whisper 失败，准备尝试 OpenAI Whisper API：', e.message);
     }
-  } else if (OPENAI_KEY) {
-    console.log('  本地 whisper 未找到，回退到 OpenAI Whisper API...');
-    console.log('  （建议安装本地 whisper：pip3 install openai-whisper）');
+  }
+
+  // 最终回退：OpenAI Whisper API
+  if (segments.length === 0 && OPENAI_KEY) {
+    console.log('  本地转录不可用，回退到 OpenAI Whisper API...');
+    console.log('  （建议安装 faster-whisper：pip3 install faster-whisper）');
     const audioFile = fs.readFileSync(audioPath);
     const b = 'WB' + Date.now();
     const fields = [
@@ -602,14 +707,16 @@ async function stepTranscribe(videoPath) {
       text:  s.text.trim()
     })).filter(s => s.text.length > 0);
     console.log(`✅ API 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
-  } else {
+  }
+
+  if (segments.length === 0) {
     console.error(`
-❌ 转录失败：本地 whisper 未安装，且未配置 OPENAI_API_KEY
+❌ 转录失败：本地 faster-whisper/whisper 不可用，且未配置 OPENAI_API_KEY
 
 请选择以下方式之一解决：
 
-【方式 A】安装本地 whisper（推荐，无需联网）
-  pip3 install openai-whisper
+【方式 A】安装 faster-whisper（推荐，无需联网）
+  pip3 install faster-whisper
   
   安装完成后重新运行：
   node douyin_to_feishu.js --step transcribe --video "${videoPath}"
@@ -878,9 +985,8 @@ async function stepWrite(paragraphsPath, title) {
   console.log('  ✅ 文档创建:', docUrl);
   await delay(800);
 
-  // ── 写入标题 ──
-  await H1(token, docId, title);
-  await BR(token, docId);
+  // ── 写入标题（Markdown） ──
+  await writeMarkdown(token, docId, `# ${title}\n`);
 
   let imgCount = 0;
 
@@ -888,18 +994,10 @@ async function stepWrite(paragraphsPath, title) {
   for (let i = 0; i < paragraphs.length; i++) {
     const p = paragraphs[i];
 
-    // 段落标题（如果有摘要，作为小标题）
-    if (p.summary) {
-      await addBlock(token, docId, {
-        block_type: 4,  // H2
-        heading2: { elements: [{ text_run: { content: `${fmtTime(p.start)}  ${p.summary}` } }] }
-      });
-    } else {
-      await P(token, docId, `**[${fmtTime(p.start)}]**`);
-    }
-
-    // 正文（完整段落文案）
-    await P(token, docId, p.text);
+    // 段落内容（Markdown）：去掉时间戳，只保留语义标题和正文
+    const sectionTitle = (p.summary && p.summary.trim()) ? p.summary.trim() : `段落 ${i + 1}`;
+    const sectionBody = (p.text || '').trim();
+    await writeMarkdown(token, docId, `## ${sectionTitle}\n\n${sectionBody}\n`);
 
     // 截图（如果有）
     if (p.frame_path && fs.existsSync(p.frame_path)) {
@@ -909,13 +1007,6 @@ async function stepWrite(paragraphsPath, title) {
       imgCount++;
     }
   }
-
-  // ── 总结章节 ──
-  await BR(token, docId);
-  await H1(token, docId, '总结');
-  await P(token, docId, `本文根据视频《${title}》由 AI 自动转录与整理，共 ${paragraphs.length} 个语义段落，插入 ${imgCount} 张关键截图。`);
-  await P(token, docId, '截图时间点由 AI 根据语义内容分析确定，选取最能体现各段核心内容的画面。');
-  await P(token, docId, '内容仅供参考，如有出入以原视频为准。');
 
   console.log('\n🎉 全部写入完成！');
   console.log('📄 飞书文档：', docUrl);
@@ -1038,7 +1129,7 @@ async function stepLogToBitable(opts = {}) {
   if (author)    fields['原作者']       = author;
   if (platform)  fields['视频平台']     = platform;
   if (videoType) fields['视频类型']     = videoType;
-  if (duration)  fields['视频时长（秒）'] = duration;
+  if (duration)  fields['视频时长（秒）'] = Math.round(Number(duration));
 
   // ── 防重复写入：按视频标题 + 飞书文档地址查重 ──────────────────
   try {

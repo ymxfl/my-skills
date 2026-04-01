@@ -8,7 +8,7 @@
  * 从以下来源读取凭证（优先级从高到低）：
  *   1. 命令行参数 --app-id / --app-secret
  *   2. 环境变量 FEISHU_APP_ID / FEISHU_APP_SECRET
- *   3. 当前目录 .env 文件
+ *   3. .env 文件（skill 根目录或当前工作目录，cwd 优先）
  */
 
 const fs = require('fs');
@@ -21,15 +21,19 @@ function getArg(name) {
   return idx !== -1 ? args[idx + 1] : null;
 }
 
-// ── 读取 .env 文件 ──
+// ── 读取 .env：skill 根目录（与 scripts 同级）+ cwd，后者覆盖前者 ──
 function loadDotEnv() {
-  const envPath = path.join(process.cwd(), '.env');
-  if (!fs.existsSync(envPath)) return {};
-  const lines = fs.readFileSync(envPath, 'utf-8').split('\n');
+  const scriptDir = path.dirname(path.resolve(__filename));
+  const skillRoot = path.dirname(scriptDir);
+  const paths = [path.join(skillRoot, '.env'), path.join(process.cwd(), '.env')];
   const env = {};
-  for (const line of lines) {
-    const m = line.match(/^\s*([^#=]+?)\s*=\s*(.*)\s*$/);
-    if (m) env[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
+  for (const envPath of paths) {
+    if (!fs.existsSync(envPath)) continue;
+    const lines = fs.readFileSync(envPath, 'utf-8').split('\n');
+    for (const line of lines) {
+      const m = line.match(/^\s*([^#=]+?)\s*=\s*(.*)\s*$/);
+      if (m) env[m[1].trim()] = m[2].trim().replace(/^["']|["']$/g, '');
+    }
   }
   return env;
 }
