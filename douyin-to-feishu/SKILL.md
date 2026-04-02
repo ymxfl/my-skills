@@ -3,23 +3,30 @@ name: douyin-to-feishu
 description: 将抖音视频转换为飞书文档。自动完成：视频下载（内置无水印解析，无需 yt-dlp）→ 本地 faster-whisper 转录（带时间戳）→ 主AI语义分析（读取转录文本，划分段落+决定截图时间点）→ 精准截帧 → [可选] AI文字优化（修正转录错误） → 内容写入飞书文档（截图与文案语义匹配交织穿插）→ 自动记录到飞书多维表格（转换日志）。支持依赖自检引导和飞书凭证缺失提示。触发词：抖音转飞书、douyin to feishu、视频转飞书文档、抖音视频提取文案。
 ---
 
-# 抖音视频 → 飞书文档（v4.1）
+# 抖音视频 → 飞书文档（v4.2）
 
 ## 运行约束（必须遵守）
 
-1. 当用户触发“抖音转飞书/视频转飞书文档/抖音视频提取文案”等需求时，务必在开始下载/转录之前先做环境检查，并把检查结果告知用户：
+1. 当用户触发"抖音转飞书/视频转飞书文档/抖音视频提取文案"等需求时，务必在开始下载/转录之前先做环境检查，并把检查结果告知用户：
    - 先执行：`node scripts/douyin_to_feishu.js --step check`
    - 将检查输出的关键结论复述给用户（依赖是否齐全、飞书凭证状态、OpenAI 是否可用、以及是否提示需要配置 `TRANSCRIBE_CHUNK_SEC`）。
 
-2. 若用户在下发内容里提到了“转录分段时长/分段时长/chunk时长/每段10分钟/15分钟”等设置：
-   - 把该时长换算为“秒”
+2. 若用户在下发内容里提到了"转录分段时长/分段时长/chunk时长/每段10分钟/15分钟"等设置：
+   - 把该时长换算为"秒"
    - 在进行音频转录（`--step transcribe`）或全流程（`--full`）时，通过 `--transcribe-chunk-sec <秒>` 传给脚本
    - 兼容输入：`XX分钟`、`XX秒`、`XXmin`、`XXs`
-   - 示例：用户说“10分钟分段”，则传 `--transcribe-chunk-sec 600`。
+   - 示例：用户说"10分钟分段"，则传 `--transcribe-chunk-sec 600`。
 
 3. 如果 `--step check` 输出提示 `TRANSCRIBE_CHUNK_SEC` 未配置（并要求用户选择/告知默认分段时长）：
    - 优先让主 AI 直接向用户提问并等待回复
    - 用户回复后，再按第 2 条把值换算成秒并继续执行转录。
+
+4. **⚠️ 路径一致性约束（关键！）**：
+   - **分步执行时，所有步骤必须使用相同的 `--work-dir`**！
+   - 脚本会自动生成带时间戳的工作目录（如 `/tmp/douyin_task_20260402104855`），包含 `video.mp4`、`segments.json`、`frames/` 等文件
+   - 如果不同步骤使用了不同的工作目录，会导致 `paragraphs.json` 中的截图路径与实际截图位置不匹配
+   - **推荐做法**：使用 `--full` 一键执行，或分步时务必在每步都加 `--work-dir /tmp/douyin_task_xxx`
+   - **脚本已内置自动修复**：如果 `frames` 或 `write` 步骤未指定 `--work-dir`，会自动查找 `/tmp` 下最新的 `douyin_task_*` 目录并关联
 
 ## 整体流程
 
@@ -360,6 +367,37 @@ node scripts/douyin_to_feishu.js --full \
 ```
 
 注意：`--full` 模式在 `analyze` 步骤会暂停，等待主 AI 完成语义分析并写入 `paragraphs.json` 后，再继续 `frames` 和 `write` 步骤。
+
+---
+
+## 分步执行（需注意路径一致性）
+
+> ⚠️ **关键提醒**：分步执行时，所有步骤必须使用相同的 `--work-dir`，否则会导致截图丢失！
+
+**正确做法**：
+```bash
+# 定义工作目录（所有步骤都用这个）
+WORK=/tmp/douyin_task_20260402104855
+
+# 步骤1：下载视频
+node scripts/douyin_to_feishu.js --step download --url "<抖音链接>" --work-dir $WORK
+
+# 步骤2：转录（无需其他参数，自动使用 $WORK/video.mp4）
+node scripts/douyin_to_feishu.js --step transcribe --work-dir $WORK
+
+# 步骤3：AI 分析（脚本会打印转录文本，AI 分析后写入 paragraphs.json）
+node scripts/douyin_to_feishu.js --step analyze --work-dir $WORK
+
+# 步骤4：截帧（无需指定 --paragraphs，会自动使用 $WORK/paragraphs.json）
+node scripts/douyin_to_feishu.js --step frames --work-dir $WORK
+
+# 步骤5：写入飞书
+node scripts/douyin_to_feishu.js --step write --title "视频标题" --work-dir $WORK
+```
+
+**脚本自动修复机制**：
+- 如果 `frames` 或 `write` 步骤未指定 `--work-dir`，会自动查找 `/tmp/douyin_task_*` 下最新的、同时包含 `paragraphs.json` 和 `video.mp4` 的目录
+- 这意味着即使不指定 `--work-dir`，也能自动关联到正确的工作目录
 
 ---
 

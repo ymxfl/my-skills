@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 抖音视频 → 飞书文档 核心脚本 v4
+ * 抖音视频 → 飞书文档 核心脚本 v4.2
  *
  * 改进（v4）：
  *   - 合并了 douyin-downloader 的能力（douyin_parser.py），不再依赖 yt-dlp
@@ -36,6 +36,10 @@
  *   2. 环境变量：FEISHU_APP_ID / FEISHU_APP_SECRET
  *   3. 当前目录 .env 文件
  *   4. 若均未配置，脚本会打印设置引导并退出
+ *
+ * 可选配置：
+ *   FEISHU_MEMBER_OPENID（或 FEISHU_MEMBER_ID）
+ *   - 在创建文档后，自动将所有者转移到该用户
  */
 
 const { execSync } = require('child_process');
@@ -76,6 +80,11 @@ const dotenv = loadDotEnv();
 
 const APP_ID        = getArg('--app-id')       || process.env.FEISHU_APP_ID     || dotenv.FEISHU_APP_ID;
 const APP_SECRET    = getArg('--app-secret')   || process.env.FEISHU_APP_SECRET || dotenv.FEISHU_APP_SECRET;
+const FEISHU_MEMBER_OPENID = getArg('--member-openid')
+  || process.env.FEISHU_MEMBER_OPENID
+  || process.env.FEISHU_MEMBER_ID
+  || dotenv.FEISHU_MEMBER_OPENID
+  || dotenv.FEISHU_MEMBER_ID;
 const OPENAI_KEY    = process.env.OPENAI_API_KEY || dotenv.OPENAI_API_KEY;
 
 function parsePositiveIntOrNull(v) {
@@ -140,6 +149,94 @@ const VIDEO_PATH    = getArg('--video',        path.join(WORK_DIR, 'video.mp4'))
 const SEGMENTS_PATH = getArg('--segments',     path.join(WORK_DIR, 'segments.json'));
 const PARAGRAPHS_PATH = getArg('--paragraphs', path.join(WORK_DIR, 'paragraphs.json'));
 const FRAMES_DIR    = getArg('--frames',        path.join(WORK_DIR, 'frames'));
+
+// ══════════════════════════════════════
+//  自动查找最新工作目录（解决分步执行时路径不一致问题）
+// ══════════════════════════════════════
+
+/**
+ * 自动查找 /tmp 下最新的包含 paragraphs.json 的工作目录
+ * 用于 frames/write 步骤未指定 --work-dir 时，自动复用已存在的最新结果
+ */
+function findLatestWorkDir() {
+  try {
+    const dirs = fs.readdirSync('/tmp')
+      .filter(d => d.startsWith('douyin_task_'))
+      .filter(d => {
+        try { return fs.statSync(path.join('/tmp', d)).isDirectory(); } catch { return false; }
+      })
+      .map(d => ({
+        name: d,
+        mtime: fs.statSync(path.join('/tmp', d)).mtimeMs,
+        hasParagraphs: fs.existsSync(path.join('/tmp', d, 'paragraphs.json')),
+        hasVideo: fs.existsSync(path.join('/tmp', d, 'video.mp4'))
+      }))
+      .filter(d => d.hasParagraphs && d.hasVideo)
+      .sort((a, b) => b.mtime - a.mtime); // 按时间倒序，最新的在前
+
+    if (dirs.length > 0) {
+      console.log(`  🔗 自动关联最新工作目录: /tmp/${dirs[0].name}`);
+      return `/tmp/${dirs[0].name}`;
+    }
+  } catch (e) {
+    // 忽略错误，继续使用默认 WORK_DIR
+  }
+  return null;
+}
+
+/**
+ * 获取 paragraphs.json 路径（优先 --paragraphs 参数，自动查找回退）
+ * @param {string} callerStep - 调用者步骤名称（用于日志）
+ */
+function resolveParagraphsPath(callerStep = 'unknown') {
+  // 如果用户明确指定了 --paragraphs，直接使用
+  const cliIdx = args.indexOf('--paragraphs');
+  if (cliIdx !== -1 && args[cliIdx + 1]) {
+    return { path: args[cliIdx + 1], autoDetected: false };
+  }
+
+  // 如果指定了 --work-dir，使用 WORK_DIR/paragraphs.json
+  if (args.includes('--work-dir')) {
+    return { path: path.join(WORK_DIR, 'paragraphs.json'), autoDetected: false };
+  }
+
+  // 自动查找最新的 paragraphs.json（解决 AI 直接写文件导致的路径不一致问题）
+  const latestDir = findLatestWorkDir();
+  if (latestDir) {
+    return { path: path.join(latestDir, 'paragraphs.json'), autoDetected: true };
+  }
+
+  // 回退到默认 WORK_DIR
+  return { path: PARAGRAPHS_PATH, autoDetected: false };
+}
+
+/**
+ * 获取 frames 目录路径（与 resolveParagraphsPath 联动）
+ */
+function resolveFramesDir(paragraphsPath) {
+  // 如果用户指定了 --frames，直接使用
+  const framesIdx = args.indexOf('--frames');
+  if (framesIdx !== -1 && args[framesIdx + 1]) {
+    return args[framesIdx + 1];
+  }
+
+  // 自动关联到 paragraphs.json 所在目录
+  return path.join(path.dirname(paragraphsPath), 'frames');
+}
+
+/**
+ * 获取 video 路径（与 resolveParagraphsPath 联动）
+ */
+function resolveVideoPath(paragraphsPath) {
+  // 如果用户指定了 --video，直接使用
+  const videoIdx = args.indexOf('--video');
+  if (videoIdx !== -1 && args[videoIdx + 1]) {
+    return args[videoIdx + 1];
+  }
+
+  // 自动关联到 paragraphs.json 所在目录
+  return path.join(path.dirname(paragraphsPath), 'video.mp4');
+}
 
 // ══════════════════════════════════════
 //  依赖检测
@@ -488,6 +585,26 @@ async function IMG(token, docId, imgPath) {
   await delay(300);
 }
 
+async function transferDocOwner(token, docId, memberOpenId) {
+  if (!memberOpenId) return;
+  const d = await fetchWithRetry(
+    `https://open.feishu.cn/open-apis/drive/v1/permissions/${docId}/members/transfer_owner?type=docx`,
+    {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        member_type: 'openid',
+        member_id: memberOpenId
+      })
+    }
+  );
+  if (!d || d.code !== 0) {
+    console.warn(`  ⚠️ 转移文档所有者失败（openid=${memberOpenId}）:`, d?.msg || 'unknown error');
+    return;
+  }
+  console.log(`  ✅ 已转移文档所有者到：${memberOpenId}`);
+}
+
 // ══════════════════════════════════════
 //  STEP 0: 依赖检测（可单独运行）
 // ══════════════════════════════════════
@@ -510,12 +627,40 @@ async function stepCheck() {
     console.log('\n  → 在对话中告知 AI："我的飞书 App ID 是 cli_xxx，App Secret 是 yyy"');
     console.log('  → 或在本终端执行：export FEISHU_APP_ID=cli_xxx（再运行脚本）');
   }
+  if (FEISHU_MEMBER_OPENID) {
+    console.log(`  ✅ FEISHU_MEMBER_OPENID 已配置（${FEISHU_MEMBER_OPENID}）`);
+  } else {
+    console.log('  ❌ FEISHU_MEMBER_OPENID 未配置');
+    console.log('     （可用 FEISHU_MEMBER_ID 作为兼容别名；未配置时将跳过文档所有者自动转移）');
+  }
 
   console.log('\n── OpenAI 配置状态 ──');
   if (OPENAI_KEY) {
     console.log(`  ✅ OPENAI_API_KEY    已配置（${OPENAI_KEY.substring(0, 6)}****）`);
   } else {
     console.log('  ℹ️  OPENAI_API_KEY    未配置（本地 whisper 可用时不需要）');
+  }
+
+  // 检查多维表格配置（用于自动记录转换日志）
+  const bitableToken = process.env.BITABLE_APP_TOKEN || dotenv.BITABLE_APP_TOKEN;
+  const bitableTable = process.env.BITABLE_TABLE_ID || dotenv.BITABLE_TABLE_ID;
+  console.log('\n── 多维表格配置（可选） ──');
+  if (bitableToken && bitableTable) {
+    console.log(`  ✅ BITABLE_APP_TOKEN 已配置（${bitableToken.substring(0, 10)}****）`);
+    console.log(`  ✅ BITABLE_TABLE_ID  已配置（${bitableTable.substring(0, 8)}****）`);
+    console.log('     → write 步骤完成后会自动记录转换日志');
+  } else {
+    console.log('  ℹ️  多维表格未配置（可选，不影响核心功能）');
+    if (!bitableToken && !bitableTable) {
+      console.log('     如需自动记录转换日志，请提供：');
+      console.log('     BITABLE_APP_TOKEN：多维表格的 app_token');
+      console.log('     BITABLE_TABLE_ID：数据表的 table_id');
+      console.log('     可在 .env 文件中配置，或告知 AI "我的多维表格配置是..."');
+    } else if (!bitableToken) {
+      console.log('     ❌ BITABLE_APP_TOKEN 未配置');
+    } else {
+      console.log('     ❌ BITABLE_TABLE_ID 未配置');
+    }
   }
 
   // 显示当前分段时长配置
@@ -1078,6 +1223,7 @@ async function stepAnalyze(segmentsPath) {
    2. 为每段推荐截图时间点（选最能体现该段核心内容的时刻，避开开头结尾 3s）
    3. 为每段写摘要（10~20 字）
    4. 直接将 paragraphs.json 写入 ${PARAGRAPHS_PATH}
+   ⚠️ 注意：后续 frames/write 步骤会自动关联到此工作目录
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
   // 检查 paragraphs.json 是否已由主 AI 写入
@@ -1228,7 +1374,7 @@ async function stepPolish(paragraphsPath) {
 }
 
 
-async function stepFrames(videoPath, paragraphsPath) {
+async function stepFrames(videoPath, paragraphsPath, framesDir) {
   console.log('\n🎞️ [Step 4] 精准截帧（按 AI 指定时间点）...');
 
   if (!commandExists('ffmpeg')) {
@@ -1236,8 +1382,10 @@ async function stepFrames(videoPath, paragraphsPath) {
     process.exit(1);
   }
 
+  // 使用传入的 framesDir（自动解析或手动指定）
+  const _framesDir = framesDir || FRAMES_DIR;
   const paragraphs = JSON.parse(fs.readFileSync(paragraphsPath, 'utf-8'));
-  fs.mkdirSync(FRAMES_DIR, { recursive: true });
+  fs.mkdirSync(_framesDir, { recursive: true });
 
   const results = [];
 
@@ -1246,7 +1394,7 @@ async function stepFrames(videoPath, paragraphsPath) {
     if (typeof p.screenshot_at !== 'number') continue;
 
     const sec = p.screenshot_at;
-    const outPath = path.join(FRAMES_DIR, `frame_p${String(i + 1).padStart(2, '0')}_${Math.round(sec)}s.jpg`);
+    const outPath = path.join(_framesDir, `frame_p${String(i + 1).padStart(2, '0')}_${Math.round(sec)}s.jpg`);
 
     try {
       execSync(
@@ -1266,7 +1414,7 @@ async function stepFrames(videoPath, paragraphsPath) {
   }
   fs.writeFileSync(paragraphsPath, JSON.stringify(paragraphs, null, 2), 'utf-8');
 
-  console.log(`\n✅ 截帧完成，共 ${results.length} 张 → ${FRAMES_DIR}`);
+  console.log(`\n✅ 截帧完成，共 ${results.length} 张 → ${_framesDir}`);
   return results;
 }
 
@@ -1295,6 +1443,7 @@ async function stepWrite(paragraphsPath, title) {
   const docUrl = `https://my.feishu.cn/docx/${docId}`;
   console.log('  ✅ 文档创建:', docUrl);
   await delay(800);
+  await transferDocOwner(token, docId, FEISHU_MEMBER_OPENID);
 
   // ── 写入标题（Markdown） ──
   await writeMarkdown(token, docId, `# ${title}\n`);
@@ -1508,9 +1657,9 @@ async function main() {
       console.log('\n✅ 完整流程结束！', docUrl);
       cleanupWorkDir();
     } else {
-      console.log('\n⏸ 请主 AI 完成语义分析后，继续执行：');
-      console.log(`   node douyin_to_feishu.js --step frames --video "${videoPath}"`);
-      console.log(`   node douyin_to_feishu.js --step write --title "${DOC_TITLE}"`);
+      console.log('\n⏸ 请主 AI 完成语义分析后，继续执行（frames/write 会自动检测最新目录，无需手动指定）：');
+      console.log(`   node douyin_to_feishu.js --step frames --work-dir "${WORK_DIR}"`);
+      console.log(`   node douyin_to_feishu.js --step write --title "${DOC_TITLE}" --work-dir "${WORK_DIR}"`);
     }
 
   } else if (STEP === 'check') {
@@ -1535,15 +1684,23 @@ async function main() {
     await stepPolish(pPath);
 
   } else if (STEP === 'frames') {
-    const pPath = getArg('--paragraphs', PARAGRAPHS_PATH);
+    const { path: pPath, autoDetected } = resolveParagraphsPath('frames');
+    if (autoDetected) {
+      console.log('  💡 提示：自动检测到已存在的 paragraphs.json，无需指定 --work-dir 或 --paragraphs');
+    }
     if (!fs.existsSync(pPath)) {
       console.error('❌ 未找到 paragraphs.json，请先运行 --step analyze 并由主 AI 写入段落数据');
       process.exit(1);
     }
-    await stepFrames(VIDEO_PATH, pPath);
+    const videoPath = resolveVideoPath(pPath);
+    const framesDir = resolveFramesDir(pPath);
+    await stepFrames(videoPath, pPath, framesDir);
 
   } else if (STEP === 'write') {
-    const pPath = getArg('--paragraphs', PARAGRAPHS_PATH);
+    const { path: pPath, autoDetected } = resolveParagraphsPath('write');
+    if (autoDetected) {
+      console.log('  💡 提示：自动检测到已存在的 paragraphs.json，无需指定 --work-dir 或 --paragraphs');
+    }
     if (!fs.existsSync(pPath)) {
       console.error('❌ 未找到 paragraphs.json，请先运行 --step analyze 和 --step frames');
       process.exit(1);
@@ -1605,6 +1762,8 @@ async function main() {
 环境变量：
   FEISHU_APP_ID       飞书应用 ID（必须，--step write 时检测）
   FEISHU_APP_SECRET   飞书应用密钥（必须）
+  FEISHU_MEMBER_OPENID 可选，文档创建后自动转移所有者到该 openid
+  FEISHU_MEMBER_ID    同上（兼容别名）
   OPENAI_API_KEY      本地 whisper 不可用时的备用 Whisper API
   TRANSCRIBE_CHUNK_SEC 转录分段阈值（秒，音频时长 > 此值才切 chunk；默认 600）
   BITABLE_APP_TOKEN   多维表格 app_token（配置后 write 完成自动记录）
