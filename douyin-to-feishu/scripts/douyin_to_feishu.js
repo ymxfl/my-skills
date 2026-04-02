@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * 抖音视频 → 飞书文档 核心脚本 v4.2
+ * 抖音视频 → 飞书文档 核心脚本 v4.3
  *
  * 改进（v4）：
  *   - 合并了 douyin-downloader 的能力（douyin_parser.py），不再依赖 yt-dlp
@@ -1510,8 +1510,46 @@ async function stepLogToBitable(opts = {}) {
   checkFeishuCredentials();
   const token = await getFeishuToken();
 
-  // ── 自动清除默认空行 ──────────────────────────────────────────
-  // 飞书新建多维表格会自动生成若干空行（字段全为 null），首次写入时一并清理
+  // ── 自动清除默认空行 & 默认字段 ────────────────────────────
+  // 飞书新建多维表格会自动生成：
+  //   1. 若干空行（字段全为 null）
+  //   2. 4 个默认字段：多行文本、单选、日期、附件
+  // 首次写入时一并清理（用户自己建的同名字段不受影响）
+
+  // 先清理默认字段
+  try {
+    const fieldsR = await fetchWithRetry(
+      `https://open.feishu.cn/open-apis/bitable/v1/apps/${bitableToken}/tables/${bitableTable}/fields`,
+      { method: 'GET', headers: { 'Authorization': 'Bearer ' + token } }
+    );
+    if (fieldsR && fieldsR.code === 0 && fieldsR.data?.items?.length) {
+      // 飞书新建表时的默认字段名（精确匹配，用户自建同名字段不受影响）
+      const DEFAULT_FIELD_NAMES = new Set(['多行文本', '单选', '日期', '附件']);
+      const toDelete = fieldsR.data.items
+        .filter(f => DEFAULT_FIELD_NAMES.has(f.field_name))
+        .map(f => ({ id: f.field_id, name: f.field_name }));
+
+      if (toDelete.length > 0) {
+        console.log(`  🧹 检测到 ${toDelete.length} 个默认字段（多行文本/单选/日期/附件），自动清理...`);
+        for (const fd of toDelete) {
+          try {
+            const delF = await fetchWithRetry(
+              `https://open.feishu.cn/open-apis/bitable/v1/apps/${bitableToken}/tables/${bitableTable}/fields/${fd.id}`,
+              { method: 'DELETE', headers: { 'Authorization': 'Bearer ' + token } }
+            );
+            if (delF && delF.code === 0) {
+              console.log(`    ✅ 已删除字段：${fd.name}`);
+            }
+          } catch {}
+        }
+      }
+    }
+  } catch (e) {
+    // 清理字段失败不阻断主流程
+    console.warn('  ⚠️  清理默认字段时出错（不影响写入）:', e.message);
+  }
+
+  // 再清理默认空行
   try {
     const listR = await fetchWithRetry(
       `https://open.feishu.cn/open-apis/bitable/v1/apps/${bitableToken}/tables/${bitableTable}/records?page_size=50`,
@@ -1714,7 +1752,7 @@ async function main() {
 
   } else {
     console.log(`
-抖音视频 → 飞书文档 v4.2（内置下载器 + 依赖检测 + 多维表格记录版）
+抖音视频 → 飞书文档 v4.3（内置下载器 + 依赖检测 + 多维表格记录版）
 
 环境检测（推荐先运行）：
   node douyin_to_feishu.js --step check
