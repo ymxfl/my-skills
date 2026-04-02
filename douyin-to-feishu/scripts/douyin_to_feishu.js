@@ -77,8 +77,56 @@ const dotenv = loadDotEnv();
 const APP_ID        = getArg('--app-id')       || process.env.FEISHU_APP_ID     || dotenv.FEISHU_APP_ID;
 const APP_SECRET    = getArg('--app-secret')   || process.env.FEISHU_APP_SECRET || dotenv.FEISHU_APP_SECRET;
 const OPENAI_KEY    = process.env.OPENAI_API_KEY || dotenv.OPENAI_API_KEY;
+
+function parsePositiveIntOrNull(v) {
+  if (v === null || v === undefined) return null;
+  const n = parseInt(String(v), 10);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return n;
+}
+
+function persistTranscribeChunkSecToEnvFile(valueSec) {
+  const envPath = path.join(SKILL_ROOT, '.env');
+  let content = '';
+  if (fs.existsSync(envPath)) content = fs.readFileSync(envPath, 'utf-8');
+
+  const key = 'TRANSCRIBE_CHUNK_SEC';
+  const lines = content.split(/\r?\n/);
+  let found = false;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*TRANSCRIBE_CHUNK_SEC\s*=/.test(lines[i])) {
+      lines[i] = `${key}=${valueSec}`;
+      found = true;
+      break;
+    }
+  }
+  if (!found) {
+    // 避免在空文件末尾追加空行导致格式混乱
+    if (lines.length === 1 && lines[0] === '') lines.pop();
+    lines.push(`${key}=${valueSec}`);
+  }
+  fs.writeFileSync(envPath, lines.join('\n'), 'utf-8');
+  console.log(`  ✅ 已写入 ${key}=${valueSec} 到 ${envPath}`);
+}
+
+const TRANSCRIBE_CHUNK_SEC_CLI_RAW = getArg('--transcribe-chunk-sec');
+let TRANSCRIBE_CHUNK_SEC = parsePositiveIntOrNull(
+  process.env.TRANSCRIBE_CHUNK_SEC ?? dotenv.TRANSCRIBE_CHUNK_SEC ?? '600'
+) ?? 600;
+if (TRANSCRIBE_CHUNK_SEC_CLI_RAW !== null && TRANSCRIBE_CHUNK_SEC_CLI_RAW !== undefined) {
+  const v = parsePositiveIntOrNull(TRANSCRIBE_CHUNK_SEC_CLI_RAW);
+  if (v) {
+    TRANSCRIBE_CHUNK_SEC = v;
+    persistTranscribeChunkSecToEnvFile(v);
+  } else {
+    console.warn('⚠️  无效的 --transcribe-chunk-sec 参数，将忽略本次覆盖：', TRANSCRIBE_CHUNK_SEC_CLI_RAW);
+  }
+}
+
 const STEP          = getArg('--step');
 const IS_FULL       = hasFlag('--full');
+const KEEP_WORK_DIR = hasFlag('--keep-work-dir') || hasFlag('--no-cleanup');
+const AUTO_CLEANUP   = (process.env.AUTO_CLEANUP_WORKDIR ?? '1') === '1' && !KEEP_WORK_DIR;
 const DOUYIN_URL    = getArg('--url');
 const DOC_TITLE     = getArg('--title',         '抖音视频文案');
 
@@ -336,6 +384,21 @@ function fmtTime(sec) {
   return `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 }
 
+function canCleanupWorkDir() {
+  // 防误删：仅对 /tmp 下的任务目录执行清理
+  return AUTO_CLEANUP && String(WORK_DIR || '').startsWith('/tmp/');
+}
+
+function cleanupWorkDir() {
+  if (!canCleanupWorkDir()) return;
+  try {
+    console.log(`\n🧹 自动清理：删除工作目录 ${WORK_DIR}`);
+    fs.rmSync(WORK_DIR, { recursive: true, force: true });
+  } catch (e) {
+    console.warn('⚠️ 自动清理失败：', e.message);
+  }
+}
+
 // ── 飞书文档写入辅助 ──
 function parseBold(text) {
   return text.split(/(\*\*[^*]+\*\*)/g).filter(Boolean).map(p =>
@@ -428,7 +491,7 @@ async function IMG(token, docId, imgPath) {
 // ══════════════════════════════════════
 //  STEP 0: 依赖检测（可单独运行）
 // ══════════════════════════════════════
-function stepCheck() {
+async function stepCheck() {
   console.log('\n🔍 [Step 0] 运行环境 & 依赖检测...');
   const result = checkDependencies(false);
 
@@ -455,10 +518,41 @@ function stepCheck() {
     console.log('  ℹ️  OPENAI_API_KEY    未配置（本地 whisper 可用时不需要）');
   }
 
+  // 显示当前分段时长配置
+  const chunkSecFromEnv = dotenv.TRANSCRIBE_CHUNK_SEC || process.env.TRANSCRIBE_CHUNK_SEC;
+  const currentChunkSec = TRANSCRIBE_CHUNK_SEC; // 最终会用的值（含默认 600）
+  const hasChunkSec = chunkSecFromEnv && String(chunkSecFromEnv).trim() !== '';
+  
+  console.log('\n── 分段时长配置 ──');
+  if (hasChunkSec) {
+    console.log(`  ✅ TRANSCRIBE_CHUNK_SEC 已配置（${currentChunkSec} 秒）`);
+    console.log(`    来源：${chunkSecFromEnv}（来自 .env 或环境变量）`);
+  } else {
+    console.log(`  ℹ️  TRANSCRIBE_CHUNK_SEC 未配置，默认将使用 ${currentChunkSec} 秒（${currentChunkSec/60} 分钟）`);
+  }
+  console.log(`  说明：音频时长 > 此值时切 chunk 转录（可用 --transcribe-chunk-sec <秒> 覆盖）`);
+
   if (!result.ok) {
     console.log('\n⚠️  请先安装缺失依赖，然后重新运行');
     process.exit(1);
   }
+
+  // 首次使用引导：如果用户尚未配置默认分段时长（TRANSCRIBE_CHUNK_SEC），询问是否要修改
+  const hasChunkSecInEnv = hasChunkSec ||
+    (TRANSCRIBE_CHUNK_SEC_CLI_RAW !== null && TRANSCRIBE_CHUNK_SEC_CLI_RAW !== undefined && parsePositiveIntOrNull(TRANSCRIBE_CHUNK_SEC_CLI_RAW) !== null);
+
+  if (!hasChunkSecInEnv) {
+    const defaultSec = 600;
+    console.log('\n── 分段时长配置（TRANSCRIBE_CHUNK_SEC） ──');
+    console.log(`  ℹ️ 当前未配置 TRANSCRIBE_CHUNK_SEC，默认将使用 ${defaultSec} 秒（10 分钟）。`);
+
+    console.log('\n  需要你的选择：');
+    console.log('  - 回复一个数字（秒），例如：900（表示 15 分钟）');
+    console.log('  - 或回复：`保持默认` / 直接什么都不改');
+    console.log(`  主 AI 读取你这条回复后，会自动用 --transcribe-chunk-sec <秒> 写入 ${path.join(SKILL_ROOT, '.env')} 并继续流程。`);
+    return;
+  }
+
   console.log('\n✅ 环境检测通过，可以开始使用！\n');
 }
 
@@ -599,16 +693,232 @@ async function stepTranscribe(videoPath) {
 
   let segments = [];
 
+  // 分段阈值（秒）
+  const chunkSec = TRANSCRIBE_CHUNK_SEC;
+  let audioDurationSec = null;
+
+  // 用 ffprobe 获取音频时长；失败时保持现有单次转录行为（不做 chunk）
+  if (commandExists('ffprobe')) {
+    try {
+      const out = execSync(
+        `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${audioPath}"`,
+        { stdio: 'pipe' }
+      ).toString().trim();
+      const sec = parseFloat(out);
+      if (Number.isFinite(sec) && sec > 0) audioDurationSec = sec;
+    } catch {
+      audioDurationSec = null;
+    }
+  }
+
+  const needChunk = audioDurationSec !== null && audioDurationSec > chunkSec;
+
   // 优先使用 faster-whisper（更快更省内存）
   const hasFasterWhisper = commandExists('python3') && pythonModuleExists('faster_whisper');
   const localWhisper = commandExists('whisper');
 
-  if (hasFasterWhisper) {
-    console.log('  使用本地 faster-whisper 转录（small 模型，中文）...');
-    const tmpScript = path.join(WORK_DIR, '_fw_transcribe.py');
+  if (needChunk) {
+    console.log(`  🎛️ 检测到音频时长 ${(audioDurationSec || 0).toFixed(2)}s > 分段阈值 ${chunkSec}s，开始 chunked 转录...`);
+    console.log(`  🔪 chunk 时长：${chunkSec}s（默认 600s）；将输出 wav：_tw_chunk_000.wav...`);
+
+    // 生成 chunk wav：16kHz mono
+    const chunkPattern = path.join(WORK_DIR, '_tw_chunk_%03d.wav');
+
+    // 清理旧 chunk（避免残留干扰）
     try {
-      const jsonPath = path.join(WORK_DIR, path.basename(audioPath, '.mp3') + '.json');
-      const pyCode = `
+      const oldChunks = fs.readdirSync(WORK_DIR).filter(f => /^_tw_chunk_\d+\.wav$/.test(f));
+      oldChunks.forEach(f => {
+        try { fs.unlinkSync(path.join(WORK_DIR, f)); } catch {}
+      });
+    } catch {}
+
+    run(`ffmpeg -y -i "${audioPath}" -vn -ac 1 -ar 16000 -c:a pcm_s16le -f segment -segment_time ${chunkSec} -reset_timestamps 1 "${chunkPattern}"`);
+
+    const chunkFiles = (() => {
+      const files = fs.readdirSync(WORK_DIR).filter(f => /^_tw_chunk_\d+\.wav$/.test(f));
+      return files
+        .map(f => {
+          const m = f.match(/^_tw_chunk_(\d+)\.wav$/);
+          return { idx: parseInt(m[1], 10), wavPath: path.join(WORK_DIR, f) };
+        })
+        .sort((a, b) => a.idx - b.idx);
+    })();
+
+    const chunks = chunkFiles.map(c => ({
+      wavPath: c.wavPath,
+      offsetSec: parseFloat((c.idx * chunkSec).toFixed(2))
+    }));
+
+    console.log(`  ✅ 已生成 ${chunks.length} 个 chunk；offsetSec 范围：${chunks[0]?.offsetSec || 0}s ~ ${chunks[chunks.length - 1]?.offsetSec || 0}s`);
+
+    // ── 分段转录：faster-whisper ──
+    if (hasFasterWhisper) {
+      console.log('  使用本地 faster-whisper 分段转录（small 模型，中文）...');
+      const tmpScript = path.join(WORK_DIR, '_fw_chunk_transcribe.py');
+      const jsonOut = path.join(WORK_DIR, '_segments_chunked_fw.json');
+      try {
+        const pyChunks = chunks.map(c => ({ wav: c.wavPath, offset: c.offsetSec }));
+        const pyCode = `
+import json
+import os
+from faster_whisper import WhisperModel
+
+chunks = ${JSON.stringify(pyChunks)}
+json_path = ${JSON.stringify(jsonOut)}
+
+model = WhisperModel("small", device="cpu", compute_type="int8")
+all_segments = []
+
+for i, ch in enumerate(chunks):
+    print(f"[chunk {i+1}/{len(chunks)}] transcribing {os.path.basename(ch['wav'])} ...", flush=True)
+    segs, _ = model.transcribe(ch['wav'], language="zh", vad_filter=True, beam_size=5)
+    for s in segs:
+        text = (s.text or "").strip()
+        if not text:
+            continue
+        start = float(s.start) + float(ch['offset'])
+        end = float(s.end) + float(ch['offset'])
+        all_segments.append({
+            "start": round(start, 2),
+            "end": round(end, 2),
+            "text": text
+        })
+
+all_segments.sort(key=lambda x: x["start"])
+with open(json_path, "w", encoding="utf-8") as f:
+    json.dump({"segments": all_segments}, f, ensure_ascii=False, indent=2)
+`;
+        fs.writeFileSync(tmpScript, pyCode, 'utf-8');
+        run(`KMP_DUPLICATE_LIB_OK=TRUE python3 "${tmpScript}"`);
+        if (!fs.existsSync(jsonOut)) throw new Error('未找到输出 JSON: ' + jsonOut);
+        const result = JSON.parse(fs.readFileSync(jsonOut, 'utf-8'));
+        segments = (result.segments || []).map(s => ({
+          start: parseFloat(s.start.toFixed(2)),
+          end: parseFloat(s.end.toFixed(2)),
+          text: s.text.trim()
+        })).filter(s => s.text.length > 0);
+        segments.sort((a, b) => a.start - b.start);
+        console.log(`✅ faster-whisper chunked 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length - 1]?.end || 0)}`);
+      } catch (e) {
+        console.warn('⚠️  faster-whisper chunked 转录失败，尝试回退到 whisper CLI：', e.message);
+      } finally {
+        try { fs.unlinkSync(tmpScript); } catch {}
+        try { fs.unlinkSync(jsonOut); } catch {}
+      }
+    }
+
+    // ── 分段转录：本地 whisper CLI ──
+    if (segments.length === 0 && localWhisper) {
+      console.log('  回退：使用本地 whisper CLI 分段转录...');
+      for (let i = 0; i < chunks.length; i++) {
+        const ch = chunks[i];
+        const chunkIdx1 = i + 1;
+        const chunkJsonPath = path.join(WORK_DIR, path.basename(ch.wavPath, '.wav') + '.json');
+        console.log(`    [chunk ${chunkIdx1}/${chunks.length}] ${path.basename(ch.wavPath)} (offset ${ch.offsetSec}s)`);
+        try {
+          // whisper CLI 会输出对应 chunk basename 的 json
+          const whisperCmd = `KMP_DUPLICATE_LIB_OK=TRUE whisper "${ch.wavPath}" --model small --language zh --output_format json --output_dir "${WORK_DIR}"`;
+          run(whisperCmd);
+          if (!fs.existsSync(chunkJsonPath)) throw new Error('未找到输出 JSON: ' + chunkJsonPath);
+          const result = JSON.parse(fs.readFileSync(chunkJsonPath, 'utf-8'));
+          const partSegments = (result.segments || []).map(s => ({
+            start: parseFloat((parseFloat(s.start) + ch.offsetSec).toFixed(2)),
+            end: parseFloat((parseFloat(s.end) + ch.offsetSec).toFixed(2)),
+            text: (s.text || '').trim()
+          })).filter(s => s.text.length > 0);
+          segments.push(...partSegments);
+        } catch (e) {
+          console.warn(`    ⚠️ chunk ${chunkIdx1}/${chunks.length} 转录失败：`, e.message);
+        } finally {
+          try { if (fs.existsSync(chunkJsonPath)) fs.unlinkSync(chunkJsonPath); } catch {}
+          try { if (fs.existsSync(ch.wavPath)) fs.unlinkSync(ch.wavPath); } catch {}
+        }
+      }
+      segments.sort((a, b) => a.start - b.start);
+      console.log(`✅ 本地 whisper CLI chunked 合并完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length - 1]?.end || 0)}`);
+    }
+
+    // ── 分段转录：OpenAI Whisper API ──
+    if (segments.length === 0 && OPENAI_KEY) {
+      console.log('  本地分段转录不可用，回退到 OpenAI Whisper API（逐 chunk 调用）...');
+      console.log('  （建议安装 faster-whisper 或本地 whisper：pip3 install faster-whisper）');
+
+      const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+      for (let i = 0; i < chunks.length; i++) {
+        const ch = chunks[i];
+        const chunkIdx1 = i + 1;
+        console.log(`    [chunk ${chunkIdx1}/${chunks.length}] OpenAI 转录中：${path.basename(ch.wavPath)} ...`);
+        try {
+          await delay(650); // 小延迟降低限流
+          const wavFile = fs.readFileSync(ch.wavPath);
+          const b = 'WB' + Date.now() + '_' + i;
+          const fields = [
+            { name: 'model', value: 'whisper-1' },
+            { name: 'language', value: 'zh' },
+            { name: 'response_format', value: 'verbose_json' },
+          ];
+          const headerParts = fields.map(f =>
+            `--${b}\r\nContent-Disposition: form-data; name="${f.name}"\r\n\r\n${f.value}\r\n`
+          ).join('');
+          const fileHeader = `--${b}\r\nContent-Disposition: form-data; name="file"; filename="${path.basename(ch.wavPath)}"\r\nContent-Type: audio/wav\r\n\r\n`;
+          const body = Buffer.concat([
+            Buffer.from(headerParts + fileHeader),
+            wavFile,
+            Buffer.from(`\r\n--${b}--\r\n`)
+          ]);
+
+          const r = await fetch(`${baseUrl}/audio/transcriptions`, {
+            method: 'POST',
+            headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': `multipart/form-data; boundary=${b}` },
+            body
+          });
+          const text = await r.text();
+          let result;
+          try { result = JSON.parse(text); } catch (e) {
+            console.error(`❌ Whisper API 响应解析失败（chunk ${chunkIdx1}）：`, text.substring(0, 200));
+            continue;
+          }
+          if (result.error) {
+            console.warn(`    ⚠️ Whisper API 错误（chunk ${chunkIdx1}）：`, result.error.message);
+            continue;
+          }
+
+          const partSegments = (result.segments || []).map(s => ({
+            start: parseFloat((parseFloat(s.start) + ch.offsetSec).toFixed(2)),
+            end: parseFloat((parseFloat(s.end) + ch.offsetSec).toFixed(2)),
+            text: (s.text || '').trim()
+          })).filter(s => s.text.length > 0);
+          segments.push(...partSegments);
+        } catch (e) {
+          console.warn(`    ⚠️ OpenAI chunk ${chunkIdx1} 转录异常：`, e.message);
+        } finally {
+          try { if (fs.existsSync(ch.wavPath)) fs.unlinkSync(ch.wavPath); } catch {}
+          await delay(250);
+        }
+      }
+
+      segments.sort((a, b) => a.start - b.start);
+      console.log(`✅ OpenAI chunked 转录合并完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length - 1]?.end || 0)}`);
+    }
+
+    // 再兜底清理 chunk wav（有些路径会提前清理，但确保不残留）
+    try {
+      for (const ch of chunks) {
+        try { if (fs.existsSync(ch.wavPath)) fs.unlinkSync(ch.wavPath); } catch {}
+      }
+    } catch {}
+
+  } else {
+    // ─────────────────────────────────────────────
+    // 非分段：保持现有单次转录行为完全不变
+    // ─────────────────────────────────────────────
+
+    if (hasFasterWhisper) {
+      console.log('  使用本地 faster-whisper 转录（small 模型，中文）...');
+      const tmpScript = path.join(WORK_DIR, '_fw_transcribe.py');
+      try {
+        const jsonPath = path.join(WORK_DIR, path.basename(audioPath, '.mp3') + '.json');
+        const pyCode = `
 import json
 from faster_whisper import WhisperModel
 
@@ -631,82 +941,83 @@ for s in segments:
 with open(json_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
 `;
-      fs.writeFileSync(tmpScript, pyCode, 'utf-8');
-      run(`KMP_DUPLICATE_LIB_OK=TRUE python3 "${tmpScript}"`);
-      if (!fs.existsSync(jsonPath)) throw new Error('未找到输出 JSON: ' + jsonPath);
-      const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        fs.writeFileSync(tmpScript, pyCode, 'utf-8');
+        run(`KMP_DUPLICATE_LIB_OK=TRUE python3 "${tmpScript}"`);
+        if (!fs.existsSync(jsonPath)) throw new Error('未找到输出 JSON: ' + jsonPath);
+        const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        segments = (result.segments || []).map(s => ({
+          start: parseFloat(s.start.toFixed(2)),
+          end:   parseFloat(s.end.toFixed(2)),
+          text:  s.text.trim()
+        })).filter(s => s.text.length > 0);
+        console.log(`✅ faster-whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
+      } catch (e) {
+        console.warn('⚠️  faster-whisper 转录失败，尝试回退到 whisper CLI：', e.message);
+      } finally {
+        try { fs.unlinkSync(tmpScript); } catch {}
+      }
+    }
+
+    // 回退：本地 whisper CLI
+    if (segments.length === 0 && localWhisper) {
+      console.log('  使用本地 whisper 转录（small 模型，中文）...');
+      try {
+        const whisperCmd = `KMP_DUPLICATE_LIB_OK=TRUE whisper "${audioPath}" --model small --language zh --output_format json --output_dir "${WORK_DIR}"`;
+        run(whisperCmd);
+        const jsonPath = path.join(WORK_DIR, path.basename(audioPath, '.mp3') + '.json');
+        if (!fs.existsSync(jsonPath)) throw new Error('未找到输出 JSON: ' + jsonPath);
+        const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
+        segments = (result.segments || []).map(s => ({
+          start: parseFloat(s.start.toFixed(2)),
+          end:   parseFloat(s.end.toFixed(2)),
+          text:  s.text.trim()
+        })).filter(s => s.text.length > 0);
+        console.log(`✅ 本地 whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
+      } catch (e) {
+        console.warn('⚠️  本地 whisper 失败，准备尝试 OpenAI Whisper API：', e.message);
+      }
+    }
+
+    // 最终回退：OpenAI Whisper API
+    if (segments.length === 0 && OPENAI_KEY) {
+      console.log('  本地转录不可用，回退到 OpenAI Whisper API...');
+      console.log('  （建议安装 faster-whisper：pip3 install faster-whisper）');
+      const audioFile = fs.readFileSync(audioPath);
+      const b = 'WB' + Date.now();
+      const fields = [
+        { name: 'model',           value: 'whisper-1' },
+        { name: 'language',        value: 'zh' },
+        { name: 'response_format', value: 'verbose_json' },
+      ];
+      const headerParts = fields.map(f =>
+        `--${b}\r\nContent-Disposition: form-data; name="${f.name}"\r\n\r\n${f.value}\r\n`
+      ).join('');
+      const fileHeader = `--${b}\r\nContent-Disposition: form-data; name="file"; filename="audio.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`;
+      const body = Buffer.concat([
+        Buffer.from(headerParts + fileHeader),
+        audioFile,
+        Buffer.from(`\r\n--${b}--\r\n`)
+      ]);
+      const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
+      const r = await fetch(`${baseUrl}/audio/transcriptions`, {
+        method: 'POST',
+        headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': `multipart/form-data; boundary=${b}` },
+        body
+      });
+      const text = await r.text();
+      let result;
+      try { result = JSON.parse(text); } catch (e) {
+        console.error('❌ Whisper API 响应解析失败:', text.substring(0, 200));
+        process.exit(1);
+      }
+      if (result.error) { console.error('❌ Whisper API 错误:', result.error.message); process.exit(1); }
       segments = (result.segments || []).map(s => ({
         start: parseFloat(s.start.toFixed(2)),
         end:   parseFloat(s.end.toFixed(2)),
         text:  s.text.trim()
       })).filter(s => s.text.length > 0);
-      console.log(`✅ faster-whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
-    } catch (e) {
-      console.warn('⚠️  faster-whisper 转录失败，尝试回退到 whisper CLI：', e.message);
-    } finally {
-      try { fs.unlinkSync(tmpScript); } catch {}
+      console.log(`✅ API 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
     }
-  }
-
-  // 回退：本地 whisper CLI
-  if (segments.length === 0 && localWhisper) {
-    console.log('  使用本地 whisper 转录（small 模型，中文）...');
-    try {
-      const whisperCmd = `KMP_DUPLICATE_LIB_OK=TRUE whisper "${audioPath}" --model small --language zh --output_format json --output_dir "${WORK_DIR}"`;
-      run(whisperCmd);
-      const jsonPath = path.join(WORK_DIR, path.basename(audioPath, '.mp3') + '.json');
-      if (!fs.existsSync(jsonPath)) throw new Error('未找到输出 JSON: ' + jsonPath);
-      const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
-      segments = (result.segments || []).map(s => ({
-        start: parseFloat(s.start.toFixed(2)),
-        end:   parseFloat(s.end.toFixed(2)),
-        text:  s.text.trim()
-      })).filter(s => s.text.length > 0);
-      console.log(`✅ 本地 whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
-    } catch (e) {
-      console.warn('⚠️  本地 whisper 失败，准备尝试 OpenAI Whisper API：', e.message);
-    }
-  }
-
-  // 最终回退：OpenAI Whisper API
-  if (segments.length === 0 && OPENAI_KEY) {
-    console.log('  本地转录不可用，回退到 OpenAI Whisper API...');
-    console.log('  （建议安装 faster-whisper：pip3 install faster-whisper）');
-    const audioFile = fs.readFileSync(audioPath);
-    const b = 'WB' + Date.now();
-    const fields = [
-      { name: 'model',           value: 'whisper-1' },
-      { name: 'language',        value: 'zh' },
-      { name: 'response_format', value: 'verbose_json' },
-    ];
-    const headerParts = fields.map(f =>
-      `--${b}\r\nContent-Disposition: form-data; name="${f.name}"\r\n\r\n${f.value}\r\n`
-    ).join('');
-    const fileHeader = `--${b}\r\nContent-Disposition: form-data; name="file"; filename="audio.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`;
-    const body = Buffer.concat([
-      Buffer.from(headerParts + fileHeader),
-      audioFile,
-      Buffer.from(`\r\n--${b}--\r\n`)
-    ]);
-    const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-    const r = await fetch(`${baseUrl}/audio/transcriptions`, {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': `multipart/form-data; boundary=${b}` },
-      body
-    });
-    const text = await r.text();
-    let result;
-    try { result = JSON.parse(text); } catch (e) {
-      console.error('❌ Whisper API 响应解析失败:', text.substring(0, 200));
-      process.exit(1);
-    }
-    if (result.error) { console.error('❌ Whisper API 错误:', result.error.message); process.exit(1); }
-    segments = (result.segments || []).map(s => ({
-      start: parseFloat(s.start.toFixed(2)),
-      end:   parseFloat(s.end.toFixed(2)),
-      text:  s.text.trim()
-    })).filter(s => s.text.length > 0);
-    console.log(`✅ API 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
   }
 
   if (segments.length === 0) {
@@ -1195,6 +1506,7 @@ async function main() {
       await stepFrames(videoPath, PARAGRAPHS_PATH);
       const docUrl = await stepWrite(PARAGRAPHS_PATH, DOC_TITLE);
       console.log('\n✅ 完整流程结束！', docUrl);
+      cleanupWorkDir();
     } else {
       console.log('\n⏸ 请主 AI 完成语义分析后，继续执行：');
       console.log(`   node douyin_to_feishu.js --step frames --video "${videoPath}"`);
@@ -1202,7 +1514,7 @@ async function main() {
     }
 
   } else if (STEP === 'check') {
-    stepCheck();
+    await stepCheck();
 
   } else if (STEP === 'download') {
     await stepDownload(DOUYIN_URL);
@@ -1237,6 +1549,7 @@ async function main() {
       process.exit(1);
     }
     await stepWrite(pPath, DOC_TITLE);
+    cleanupWorkDir();
 
   } else if (STEP === 'log') {
     // 单独记录到多维表格（不依赖飞书文档生成步骤）
@@ -1258,6 +1571,8 @@ async function main() {
 
   2. 本地 Whisper 转录（带时间戳）
      node douyin_to_feishu.js --step transcribe --work-dir $WORK
+     # 可选：覆盖本次分段阈值（秒，audio时长 > 该值才切 chunk）
+     # node douyin_to_feishu.js --step transcribe --work-dir $WORK --transcribe-chunk-sec 900
      → 优先用本地 whisper，无则回退到 OpenAI Whisper API
      → 输出 segments.json（每句话的时间范围和文案）
 
@@ -1278,6 +1593,7 @@ async function main() {
 
   5. 写入飞书文档（完成后自动记录到多维表格，如已配置）
      node douyin_to_feishu.js --step write --title "视频标题" --work-dir $WORK
+     → 默认在 '--step write' 或 '--full' 结束后自动清理 '/tmp' 工作目录；如需保留中间文件，追加 '--keep-work-dir'（或 '--no-cleanup'）。
 
   6. [可选] 单独记录到多维表格
      node douyin_to_feishu.js --step log --work-dir $WORK \\
@@ -1290,6 +1606,7 @@ async function main() {
   FEISHU_APP_ID       飞书应用 ID（必须，--step write 时检测）
   FEISHU_APP_SECRET   飞书应用密钥（必须）
   OPENAI_API_KEY      本地 whisper 不可用时的备用 Whisper API
+  TRANSCRIBE_CHUNK_SEC 转录分段阈值（秒，音频时长 > 此值才切 chunk；默认 600）
   BITABLE_APP_TOKEN   多维表格 app_token（配置后 write 完成自动记录）
   BITABLE_TABLE_ID    多维表格数据表 ID
     `);
