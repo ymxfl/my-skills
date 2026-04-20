@@ -1232,7 +1232,7 @@ async function stepAnalyze(segmentsPath) {
     if (Array.isArray(paragraphs) && paragraphs.length > 0) {
       console.log(`\n✅ 检测到 paragraphs.json（${paragraphs.length} 段）`);
       paragraphs.forEach((p, i) => {
-        console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | 截图@${fmtTime(p.screenshot_at)} | ${p.summary || ''}`);
+        console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | 截图@${fmtTime(p.screenshot_at)} | ${p.summary || p.title || ''}`);
       });
       return paragraphs;
     }
@@ -1316,7 +1316,7 @@ function stepWriteParagraphs(dataStr, filePath) {
   fs.writeFileSync(PARAGRAPHS_PATH, JSON.stringify(paragraphs, null, 2), 'utf-8');
   console.log(`✅ paragraphs.json 已写入 ${PARAGRAPHS_PATH}，共 ${paragraphs.length} 段`);
   paragraphs.forEach((p, i) => {
-    console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | 截图@${fmtTime(p.screenshot_at)} | ${p.summary || ''}`);
+    console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | 截图@${fmtTime(p.screenshot_at)} | ${p.summary || p.title || ''}`);
   });
 }
 
@@ -1349,8 +1349,8 @@ async function stepPolish(paragraphsPath) {
   console.log(`📄 共 ${paragraphs.length} 段，以下是当前文案内容：\n`);
   paragraphs.forEach((p, i) => {
     console.log(`━━━ 段落 [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} ━━━`);
-    console.log(`摘要：${p.summary || '（无）'}`);
-    console.log(`文案：\n${p.text}`);
+    console.log(`摘要：${p.summary || p.title || '（无）'}`);
+    console.log(`文案：\n${p.text || p.content || ''}`);
     console.log('');
   });
 
@@ -1454,9 +1454,10 @@ async function stepWrite(paragraphsPath, title) {
   for (let i = 0; i < paragraphs.length; i++) {
     const p = paragraphs[i];
 
-    // 段落内容（Markdown）：去掉时间戳，只保留语义标题和正文
-    const sectionTitle = (p.summary && p.summary.trim()) ? p.summary.trim() : `段落 ${i + 1}`;
-    const sectionBody = (p.text || '').trim();
+    // 段落内容（Markdown）：支持多种字段名（兼容性修复）
+    // 优先：p.summary/p.text；后备：p.title/p.content；默认：段落 N
+    const sectionTitle = (p.summary && p.summary.trim()) || (p.title && p.title.trim()) || `段落 ${i + 1}`;
+    const sectionBody = (p.text || p.content || '').trim();
     await writeMarkdown(token, docId, `## ${sectionTitle}\n\n${sectionBody}\n`);
 
     // 截图（如果有）
