@@ -89,3 +89,4 @@ config.local.*
 *.dll
 *.exe
 *.out
+scripts/sync-douyin-skill.sh
