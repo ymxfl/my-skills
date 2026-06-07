@@ -3,7 +3,7 @@
  * 多平台视频 → 飞书文档 核心脚本 v4.4
  *
  * 改进（v4）：
- *   - 合并了 douyin-downloader 的能力（douyin_parser.py），不再依赖 yt-dlp
+ *   - 合并了 douyin-downloader 的能力（douyin_video_parser.py），不再依赖 yt-dlp
  *   - 启动时自动检测所有依赖工具（ffmpeg / python3 / whisper / Node.js）
  *     若缺失则打印详细安装引导，不静默失败
  *   - 敏感凭证（飞书 App ID/Secret）缺失时打印清晰的设置引导
@@ -59,7 +59,7 @@ function getArg(name, defaultVal = null) {
 }
 function hasFlag(name) { return args.includes(name); }
 
-// douyin_parser.py 所在目录（和本脚本同目录）；需在 loadDotEnv 之前定义以便读取 skill 根目录 .env
+// douyin_video_parser.py 所在目录（和本脚本同目录）；需在 loadDotEnv 之前定义以便读取 skill 根目录 .env
 const SCRIPTS_DIR   = path.dirname(path.resolve(__filename));
 const SKILL_ROOT    = path.dirname(SCRIPTS_DIR);
 
@@ -382,7 +382,7 @@ function checkDependencies(strict = true) {
     console.log('  ❌ ffmpeg  未安装');
   }
 
-  // python3（运行 douyin_parser.py 下载视频）
+  // python3（运行 douyin_video_parser.py 下载视频）
   if (commandExists('python3')) {
     const v = (() => { try { return execFileSync('python3', ['--version'], { stdio: 'pipe' }).toString().trim(); } catch { return ''; } })();
     console.log(`  ✅ python3  ${v}`);
@@ -1040,7 +1040,7 @@ async function stepCheck() {
 }
 
 // ══════════════════════════════════════
-//  STEP 1: 下载视频（使用 douyin_parser.py）
+//  STEP 1: 下载视频（使用 douyin_video_parser.py）
 // ══════════════════════════════════════
 async function stepDownload(url) {
   if (!url) { console.error('❌ 请提供 --url 参数'); process.exit(1); }
@@ -1059,9 +1059,9 @@ async function stepDownloadDouyin(url, platform = detectPlatform(url)) {
   console.log('  使用内置抖音无水印解析器...');
   fs.mkdirSync(WORK_DIR, { recursive: true });
 
-  const parserPath = path.join(SCRIPTS_DIR, 'douyin_parser.py');
+  const parserPath = path.join(SCRIPTS_DIR, 'douyin_video_parser.py');
   if (!fs.existsSync(parserPath)) {
-    console.error(`❌ 未找到 douyin_parser.py，路径：${parserPath}`);
+    console.error(`❌ 未找到 douyin_video_parser.py，路径：${parserPath}`);
     console.error('   请确认 skill 完整性，或重新安装 video-to-feishu skill');
     process.exit(1);
   }
@@ -1081,7 +1081,7 @@ async function stepDownloadDouyin(url, platform = detectPlatform(url)) {
     process.exit(1);
   }
 
-  // 使用内嵌 Python 脚本调用 douyin_parser（指定输出路径）
+  // 使用内嵌 Python 脚本调用 douyin_video_parser（指定输出路径）
   const outputBase = VIDEO_PATH.replace(/\.mp4$/, '');
   const outputDir  = path.dirname(VIDEO_PATH);
   const outputName = path.basename(outputBase);
@@ -1091,7 +1091,7 @@ async function stepDownloadDouyin(url, platform = detectPlatform(url)) {
   const pyCode = `
 import sys
 sys.path.insert(0, ${JSON.stringify(SCRIPTS_DIR)})
-from douyin_parser import parse_video, download_video
+from douyin_video_parser import parse_video, download_video
 import json
 
 url = ${JSON.stringify(url)}
@@ -1104,7 +1104,7 @@ print("[下载] 视频标题:", info['desc'][:60])
 saved = download_video(info, output_path=out_name, output_dir=out_dir, verbose=True)
 print("SAVED_PATH:" + saved)
 
-# 输出视频元数据，供主脚本使用（duration 在 douyin_parser 中为毫秒，此处转为秒）
+# 输出视频元数据，供主脚本使用（duration 在 douyin_video_parser 中为毫秒，此处转为秒）
 _ms = int(info.get('duration', 0) or info.get('video', {}).get('duration', 0) or 0)
 _sec = round(_ms / 1000.0, 2) if _ms else 0
 print("VIDEO_TITLE:" + info['desc'][:80])
@@ -1160,7 +1160,7 @@ print("VIDEO_URL:" + url)
     url:      (urlMatch      ? urlMatch[1].trim()      : url),
     platform: platform.label,
     platform_key: platform.key,
-    downloader: 'douyin_parser',
+    downloader: 'douyin_video_parser',
   };
 
   fs.writeFileSync(path.join(WORK_DIR, 'video_title.txt'), meta.title, 'utf-8');
@@ -2436,7 +2436,7 @@ async function main() {
 
   1. 下载视频
      node video_to_feishu.js --step download --url "<视频链接或分享文案>" --work-dir $WORK
-     → 抖音：使用内置 douyin_parser
+     → 抖音：使用内置 douyin_video_parser
      → 快手：使用公开分享页解析器
      → 哔哩哔哩/微博/小红书：使用 yt-dlp
      → 如内容需要登录，可配置 YTDLP_COOKIES 或 YTDLP_COOKIES_FROM_BROWSER=chrome

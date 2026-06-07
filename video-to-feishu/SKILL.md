@@ -43,7 +43,7 @@ node scripts/video_to_feishu.js --step write --title "视频标题" --work-dir "
 
 ## Platform Strategy
 
-- Douyin: use the bundled `scripts/douyin_parser.py` with multiple fallbacks.
+- Douyin: use the bundled `scripts/douyin_video_parser.py` with multiple fallbacks.
 - Kuaishou: resolve public share links and parse SSR state (`window.INIT_STATE` / `window.__APOLLO_STATE__`) to find the real File Block/video URL.
 - Bilibili, Weibo, Xiaohongshu: use `yt-dlp`.
 - Weibo: keep the original `video.weibo.com/show?...` URL for `yt-dlp`; do not replace it with the `h5.video.weibo.com` redirect, which can be unsupported.
@@ -92,5 +92,5 @@ If owner transfer appears wrong, inspect Feishu UI and permissions. The script g
 
 - `scripts/video_to_feishu.js`: main workflow script.
 - `scripts/check_feishu_auth.js`: Feishu credential checker.
-- `scripts/douyin_parser.py`: Douyin no-watermark parser/downloader used by the main script.
+- `scripts/douyin_video_parser.py`: Douyin no-watermark parser/downloader used by the main script.
 - `references/feishu_api.md`: Feishu Docx/image/file upload reference and gotchas.
