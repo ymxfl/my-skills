@@ -1,0 +1,4 @@
+interface:
+  display_name: "Video to Feishu"
+  short_description: "Turn platform videos into Feishu docs."
+  default_prompt: "Convert this video link or share text into a Feishu document."
