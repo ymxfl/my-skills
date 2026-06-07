@@ -163,6 +163,20 @@ Body: { "replace_file": { "token": "<file_token>" } }
 
 ---
 
+## 所有者转移
+
+文档和多维表格都走 Drive 权限接口，`type` 必须匹配资源类型：
+
+```
+POST /drive/v1/permissions/{docId}/members/transfer_owner?type=docx
+POST /drive/v1/permissions/{bitableAppToken}/members/transfer_owner?type=bitable
+Body: { "member_type": "openid", "member_id": "<FEISHU_MEMBER_OPENID>" }
+```
+
+转移失败时只记录告警，不阻断文档写入或多维表格记录。
+
+---
+
 ## 限流策略
 
 飞书 API 有频率限制，连续快速请求会返回空响应。

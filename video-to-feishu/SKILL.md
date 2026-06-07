@@ -25,7 +25,7 @@ Use one `--work-dir` for every step in a run. Prefer `/tmp/douyin_task_YYYYMMDDH
 4. Read `segments.json` and create semantic `paragraphs.json`.
 5. Extract one screenshot per semantic paragraph.
 6. Write the Feishu doc: H1 title, original video file block at the beginning, then H2 sections, semantic paragraphs, and screenshots.
-7. Record to Bitable when `BITABLE_APP_TOKEN` and `BITABLE_TABLE_ID` are configured.
+7. Record to Bitable when `BITABLE_APP_TOKEN` and `BITABLE_TABLE_ID` are configured, and transfer the Bitable owner to `FEISHU_MEMBER_OPENID` when available.
 
 Typical commands:
 
@@ -86,7 +86,7 @@ This only validates token by default. Add `--create-test-doc` only when a real p
 
 For file/video insertion, use the real File Block ID. Feishu may create a `block_type: 33` View wrapper and nest the actual `block_type: 23` File Block under it. Upload and `replace_file` must target the nested File Block, not the wrapper. See `references/feishu_api.md` for the exact API sequence.
 
-If owner transfer appears wrong, inspect Feishu UI and permissions. The script grants/tries owner transfer with `FEISHU_MEMBER_OPENID`; API responses can show `full_access` even when UI ownership differs.
+If owner transfer appears wrong, inspect Feishu UI and permissions. The script tries owner transfer with `FEISHU_MEMBER_OPENID` for both Docx (`type=docx`) and Bitable (`type=bitable`); API responses can show `full_access` even when UI ownership differs.
 
 ## Bundled Resources
 

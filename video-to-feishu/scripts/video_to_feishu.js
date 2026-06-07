@@ -923,10 +923,10 @@ async function writeSemanticSection(token, docId, title, body) {
   if (parts.length === 0) await BR(token, docId);
 }
 
-async function transferDocOwner(token, docId, memberOpenId) {
-  if (!memberOpenId) return;
+async function transferDriveOwner(token, resourceToken, resourceType, label, memberOpenId) {
+  if (!memberOpenId || !resourceToken) return false;
   const d = await fetchWithRetry(
-    `https://open.feishu.cn/open-apis/drive/v1/permissions/${docId}/members/transfer_owner?type=docx`,
+    `https://open.feishu.cn/open-apis/drive/v1/permissions/${resourceToken}/members/transfer_owner?type=${resourceType}`,
     {
       method: 'POST',
       headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
@@ -937,10 +937,19 @@ async function transferDocOwner(token, docId, memberOpenId) {
     }
   );
   if (!d || d.code !== 0) {
-    console.warn(`  ⚠️ 转移文档所有者失败（openid=${memberOpenId}）:`, d?.msg || 'unknown error');
-    return;
+    console.warn(`  ⚠️ 转移${label}所有者失败（openid=${memberOpenId}）:`, d?.msg || 'unknown error');
+    return false;
   }
-  console.log(`  ✅ 已转移文档所有者到：${memberOpenId}`);
+  console.log(`  ✅ 已转移${label}所有者到：${memberOpenId}`);
+  return true;
+}
+
+async function transferDocOwner(token, docId, memberOpenId) {
+  return transferDriveOwner(token, docId, 'docx', '文档', memberOpenId);
+}
+
+async function transferBitableOwner(token, bitableToken, memberOpenId) {
+  return transferDriveOwner(token, bitableToken, 'bitable', '多维表格', memberOpenId);
 }
 
 // ══════════════════════════════════════
@@ -2178,6 +2187,7 @@ async function stepLogToBitable(opts = {}) {
   console.log('\n📊 [Step 6] 记录转换结果到飞书多维表格...');
   checkFeishuCredentials();
   const token = await getFeishuToken();
+  await transferBitableOwner(token, bitableToken, FEISHU_MEMBER_OPENID);
 
   // ── 自动清除默认空行 & 默认字段 ────────────────────────────
   // 飞书新建多维表格会自动生成：
