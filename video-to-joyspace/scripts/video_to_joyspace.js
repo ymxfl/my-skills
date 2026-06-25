@@ -2,7 +2,7 @@
 /**
  * 多平台视频 → JoySpace 文档 核心脚本
  *
- * 移植自 video_to_feishu.js，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
+ * 由飞书版脚本移植，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
  * write 步骤改为组装 final_markdown.md（图片/视频上传已注释，JoySpace 暂不支持）。
  * 由主 AI 读取 final_markdown.md 后通过 MCP create_doc_routing 创建 JoySpace 文档。
  *
@@ -48,7 +48,7 @@ const SKILL_ROOT    = path.dirname(SCRIPTS_DIR);
 
 /**
  * 读取 .env：先 skill 根目录，再 cwd；后者覆盖前者。
- * 这样无论从仓库哪一级执行 node scripts/video_to_feishu.js，都能加载凭证。
+ * 这样无论从仓库哪一级执行 node scripts/video_to_joyspace.js，都能加载凭证。
  */
 function loadDotEnv() {
   const paths = [
@@ -504,114 +504,6 @@ function cleanupOldWorkDirs() {
   }
 }
 
-
-async function listDocumentBlocks(token, docId) {
-  const items = [];
-  let pageToken = '';
-  do {
-    const qs = new URLSearchParams({ page_size: '500' });
-    if (pageToken) qs.set('page_token', pageToken);
-    const d = await fetchWithRetry(
-      `https://open.feishu.cn/open-apis/docx/v1/documents/${docId}/blocks?${qs.toString()}`,
-      { method: 'GET', headers: { 'Authorization': 'Bearer ' + token } }
-    );
-    if (!d || d.code !== 0) {
-      console.warn('  ❌ 获取文档块列表失败:', d?.msg || 'unknown error');
-      return items;
-    }
-    items.push(...(d.data?.items || []));
-    pageToken = d.data?.page_token || '';
-  } while (pageToken);
-  return items;
-}
-
-async function resolveCreatedFileBlockId(token, docId, createResponse) {
-  const children = createResponse?.data?.children || [];
-  const direct = children.find(b => b.block_type === 23 && b.block_id);
-  if (direct) return direct.block_id;
-
-  const wrapperIds = new Set(children.map(b => b.block_id).filter(Boolean));
-  const blocks = await listDocumentBlocks(token, docId);
-  const nested = blocks.find(b => b.block_type === 23 && wrapperIds.has(b.parent_id));
-  if (nested) return nested.block_id;
-
-  const emptyFile = [...blocks].reverse().find(b => b.block_type === 23 && !b.file?.token);
-  return emptyFile?.block_id || children[0]?.block_id || null;
-}
-
-
-
-const MEDIA_DIRECT_UPLOAD_LIMIT = 20 * 1024 * 1024;
-
-
-
-function splitSemanticParagraphs(text) {
-  const normalized = String(text || '')
-    .replace(/\r\n/g, '\n')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
-  if (!normalized) return [];
-
-  const explicit = normalized
-    .split(/\n{2,}/)
-    .map(p => p.replace(/\n+/g, ' ').trim())
-    .filter(Boolean);
-  if (explicit.length > 1) return explicit;
-
-  const lineParts = normalized
-    .split(/\n+/)
-    .map(p => p.trim())
-    .filter(Boolean);
-  if (lineParts.length > 1) return lineParts;
-
-  const sentences = normalized.match(/[^。！？!?；;]+[。！？!?；;]?/g) || [normalized];
-  const paragraphs = [];
-  let current = '';
-  let sentenceCount = 0;
-  for (const raw of sentences) {
-    const sentence = raw.trim();
-    if (!sentence) continue;
-    const joiner = current && /[A-Za-z0-9.!?]$/.test(current) && /^[A-Za-z0-9]/.test(sentence) ? ' ' : '';
-    const next = current ? current + joiner + sentence : sentence;
-    sentenceCount++;
-    if (current && (next.length > 180 || sentenceCount > 3)) {
-      paragraphs.push(current);
-      current = sentence;
-      sentenceCount = 1;
-    } else {
-      current = next;
-    }
-  }
-  if (current) paragraphs.push(current);
-  return paragraphs;
-}
-
-
-async function transferDriveOwner(token, resourceToken, resourceType, label, memberOpenId) {
-  if (!memberOpenId || !resourceToken) return false;
-  const d = await fetchWithRetry(
-    `https://open.feishu.cn/open-apis/drive/v1/permissions/${resourceToken}/members/transfer_owner?type=${resourceType}`,
-    {
-      method: 'POST',
-      headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        member_type: 'openid',
-        member_id: memberOpenId
-      })
-    }
-  );
-  if (!d || d.code !== 0) {
-    console.warn(`  ⚠️ 转移${label}所有者失败（openid=${memberOpenId}）:`, d?.msg || 'unknown error');
-    return false;
-  }
-  console.log(`  ✅ 已转移${label}所有者到：${memberOpenId}`);
-  return true;
-}
-
-
-async function transferBitableOwner(token, bitableToken, memberOpenId) {
-  return transferDriveOwner(token, bitableToken, 'bitable', '多维表格', memberOpenId);
-}
 
 // ══════════════════════════════════════
 //  STEP 0: 依赖检测（可单独运行）
@@ -1503,7 +1395,7 @@ with open(json_path, "w", encoding="utf-8") as f:
   pip3 install faster-whisper
   
   安装完成后重新运行：
-  node video_to_feishu.js --step transcribe --video "${videoPath}"
+  node video_to_joyspace.js --step transcribe --video "${videoPath}"
 
 【方式 B】配置 OpenAI API Key（在线转录）
   方法1：在对话中告知 AI："我的 OpenAI API Key 是 sk-xxx"
@@ -1574,10 +1466,10 @@ async function stepAnalyze(segmentsPath) {
  * 辅助工具：将主 AI 分析结果写入 paragraphs.json
  *
  * 推荐用法（稳定）：先用文件写工具把 JSON 写到文件，再传文件路径
- *   node video_to_feishu.js --step write-paragraphs --file /tmp/douyin_task/paragraphs.json
+ *   node video_to_joyspace.js --step write-paragraphs --file /tmp/douyin_task/paragraphs.json
  *
  * 也支持 --data 传字符串（仅内容不含特殊字符时可用）：
- *   node video_to_feishu.js --step write-paragraphs --data '<JSON>'
+ *   node video_to_joyspace.js --step write-paragraphs --data '<JSON>'
  *
  * 说明：--data 方式在段落文本含中文引号、换行符等特殊字符时，Shell 会破坏 JSON 结构，
  *       导致解析失败。推荐始终使用 --file 方式，先直接写文件再执行此命令。
@@ -1609,7 +1501,7 @@ function stepWriteParagraphs(dataStr, filePath) {
       console.error('❌ --data JSON 解析失败:', e.message);
       console.error('  提示：如果段落文本含中文引号或换行符，请改用 --file 方式：');
       console.error('  1. 先将 JSON 写入文件（AI 使用文件写工具）');
-      console.error(`  2. 执行：node video_to_feishu.js --step write-paragraphs --file <文件路径>`);
+      console.error(`  2. 执行：node video_to_joyspace.js --step write-paragraphs --file <文件路径>`);
       process.exit(1);
     }
   } else {
@@ -1626,7 +1518,7 @@ function stepWriteParagraphs(dataStr, filePath) {
       console.error('❌ 请提供 --file <路径> 或 --data <JSON>');
       console.error('  推荐方式：');
       console.error('  1. 将 JSON 写入文件（AI 使用文件写工具直接写入）');
-      console.error(`  2. node video_to_feishu.js --step write-paragraphs --file ${PARAGRAPHS_PATH}`);
+      console.error(`  2. node video_to_joyspace.js --step write-paragraphs --file ${PARAGRAPHS_PATH}`);
       process.exit(1);
     }
   }
@@ -1693,7 +1585,7 @@ async function stepPolish(paragraphsPath) {
    2. 修改完毕后，直接将完整的 paragraphs.json 写回：
       ${paragraphsPath}
    3. 写回后执行：
-      node video_to_feishu.js --step write-paragraphs --file ${paragraphsPath}
+      node video_to_joyspace.js --step write-paragraphs --file ${paragraphsPath}
       验证内容是否正确保存。
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 `);
@@ -1748,72 +1640,48 @@ async function stepFrames(videoPath, paragraphsPath, framesDir) {
 }
 
 // ══════════════════════════════════════
-//  STEP 5: 写入飞书文档
+//  STEP 5: 组装 final_markdown.md
 // ══════════════════════════════════════
-async function stepWrite(paragraphsPath, title) {
-  console.log('\n📝 [Step 5] 写入飞书文档...');
+/**
+ * 将 paragraphs.json 组装为 JoySpace 文档的 Markdown 文本。
+ * 图片/视频上传已注释（JoySpace 暂不支持），但保留文件路径以便未来恢复。
+ */
+function buildMarkdown(paragraphs, title, sourceVideoPath) {
+  let md = `# ${title}\n\n`;
 
-  // 检查飞书凭证（缺失时打印引导并退出）
-  checkFeishuCredentials();
+  // ── 原视频上传（文档开头）— JoySpace 暂不支持，注释保留路径 ──
+  md += `<!-- JoySpace 暂不支持上传本地视频到文档 — 原视频路径: ${sourceVideoPath || '(未找到)'} -->\n\n`;
+
+  for (let i = 0; i < paragraphs.length; i++) {
+    const p = paragraphs[i];
+    const sectionTitle = (p.summary && p.summary.trim())
+      || (p.title && p.title.trim())
+      || `段落 ${i + 1}`;
+    const sectionBody = (p.text || p.content || '').trim();
+    md += `## ${sectionTitle}\n\n${sectionBody}\n\n`;
+
+    // ── 截图上传 — JoySpace 暂不支持，注释保留路径 ──
+    if (p.frame_path) {
+      md += `<!-- JoySpace 暂不支持上传图片到文档 — 截图: ${p.frame_path} -->\n\n`;
+    }
+  }
+  return md;
+}
+
+async function stepWrite(paragraphsPath, title) {
+  console.log('\n📝 [Step 5] 组装 final_markdown.md ...');
 
   const paragraphs = JSON.parse(fs.readFileSync(paragraphsPath, 'utf-8'));
   console.log(`  段落数：${paragraphs.length}，含截图：${paragraphs.filter(p => p.frame_path).length} 张`);
 
-  const token = await getFeishuToken();
-
-  // 创建新文档
-  const cr = await fetchWithRetry(
-    'https://open.feishu.cn/open-apis/docx/v1/documents',
-    { method: 'POST', headers: { 'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title }) }
-  );
-  if (!cr || cr.code !== 0) { console.error('❌ 创建文档失败:', cr?.msg); process.exit(1); }
-  const docId = cr.data.document.document_id;
-  const docUrl = `https://my.feishu.cn/docx/${docId}`;
-  console.log('  ✅ 文档创建:', docUrl);
-  await delay(800);
-  await transferDocOwner(token, docId, FEISHU_MEMBER_OPENID);
-
-  // ── 写入标题（Markdown） ──
-  await writeMarkdown(token, docId, `# ${title}\n`);
-
-  // ── 写入原视频（放在文章开头，便于先看完整素材） ──
   const sourceVideoPath = resolveVideoPath(paragraphsPath);
-  if (fs.existsSync(sourceVideoPath)) {
-    console.log('  → 上传原视频到文档开头:', sourceVideoPath);
-    await FILE(token, docId, sourceVideoPath, '原视频');
-  } else {
-    console.warn('  ⚠️ 未找到原视频，跳过文档开头视频上传:', sourceVideoPath);
-  }
+  const md = buildMarkdown(paragraphs, title, sourceVideoPath);
+  const outPath = path.join(WORK_DIR, 'final_markdown.md');
+  fs.writeFileSync(outPath, md, 'utf-8');
 
-  let imgCount = 0;
-
-  // ── 逐段写入文案 + 截图 ──
-  for (let i = 0; i < paragraphs.length; i++) {
-    const p = paragraphs[i];
-
-    // 段落内容（Markdown）：支持多种字段名（兼容性修复）
-    // 优先：p.summary/p.text；后备：p.title/p.content；默认：段落 N
-    const sectionTitle = (p.summary && p.summary.trim()) || (p.title && p.title.trim()) || `段落 ${i + 1}`;
-    const sectionBody = (p.text || p.content || '').trim();
-    await writeSemanticSection(token, docId, sectionTitle, sectionBody);
-
-    // 截图（如果有）
-    if (p.frame_path && fs.existsSync(p.frame_path)) {
-      console.log(`  → 段落[${i + 1}] 插入截图 @${fmtTime(p.screenshot_at)}`);
-      await IMG(token, docId, p.frame_path);
-      await BR(token, docId);
-      imgCount++;
-    }
-  }
-
-  console.log('\n🎉 全部写入完成！');
-  console.log('📄 飞书文档：', docUrl);
-
-  // 自动记录到多维表格（如果配置了 BITABLE_APP_TOKEN）
-  await stepLogToBitable({ docUrl, paragraphCount: paragraphs.length, screenshotCount: imgCount }).catch(() => {});
-
-  return docUrl;
+  console.log(`  ✅ 已生成: ${outPath}`);
+  console.log('  ℹ️  下一步：主 AI 读取该文件，调用 MCP create_doc_routing 创建 JoySpace 文档');
+  return outPath;
 }
 
 
@@ -1843,8 +1711,8 @@ async function main() {
       console.log('\n✅ 完整流程结束！', docUrl);
     } else {
       console.log('\n⏸ 请主 AI 完成语义分析后，继续执行（frames/write 会自动检测最新目录，无需手动指定）：');
-      console.log(`   node video_to_feishu.js --step frames --work-dir "${WORK_DIR}"`);
-      console.log(`   node video_to_feishu.js --step write --title "${DOC_TITLE}" --work-dir "${WORK_DIR}"`);
+      console.log(`   node video_to_joyspace.js --step frames --work-dir "${WORK_DIR}"`);
+      console.log(`   node video_to_joyspace.js --step write --title "${DOC_TITLE}" --work-dir "${WORK_DIR}"`);
     }
 
   } else if (STEP === 'check') {
@@ -1892,74 +1760,45 @@ async function main() {
     }
     await stepWrite(pPath, DOC_TITLE);
 
-  } else if (STEP === 'log') {
-    // 单独记录到多维表格（不依赖飞书文档生成步骤）
-    await stepLogToBitable();
-
   } else {
     console.log(`
-多平台视频 → 飞书文档 v4.4（抖音/快手内置解析 + yt-dlp 多平台下载 + 多维表格记录版）
+多平台视频 → JoySpace 文档（抖音/快手内置解析 + yt-dlp 多平台下载；写入本地 final_markdown.md）
 
 环境检测（推荐先运行）：
-  node video_to_feishu.js --step check
+  node scripts/video_to_joyspace.js --step check
 
-流程（推荐按顺序执行）：
-  分步执行时，请通过 --work-dir 指定同一工作目录（或直接使用 --full 辅助全流程）。
-  工作目录示例：WORK=/tmp/douyin_task_20260329
+流程（按顺序，--work-dir 共享同一目录）：
+  WORK=/tmp/video_to_joyspace_task
 
-  1. 下载视频
-     node video_to_feishu.js --step download --url "<视频链接或分享文案>" --work-dir $WORK
+  1. 下载视频（平台链接或分享文案）
+     node scripts/video_to_joyspace.js --step download --url "<链接或分享文案>" --work-dir $WORK
      → 抖音：使用内置 douyin_video_parser
      → 快手：使用公开分享页解析器
      → 哔哩哔哩/微博/小红书：使用 yt-dlp
      → 如内容需要登录，可配置 YTDLP_COOKIES 或 YTDLP_COOKIES_FROM_BROWSER=chrome
 
-  2. 本地 Whisper 转录（带时间戳）
-     node video_to_feishu.js --step transcribe --work-dir $WORK
-     # 可选：覆盖本次分段阈值（秒，audio时长 > 该值才切 chunk）
-     # node video_to_feishu.js --step transcribe --work-dir $WORK --transcribe-chunk-sec 900
-     → 优先用本地 whisper，无则回退到 OpenAI Whisper API
-     → 输出 segments.json（每句话的时间范围和文案）
+  2. 本地 Whisper 转录
+     node scripts/video_to_joyspace.js --step transcribe --work-dir $WORK
 
-  3. AI 语义分析（由主 AI 直接完成，不调用外部 LLM）
-     node video_to_feishu.js --step analyze --work-dir $WORK
-     → 打印转录全文，由主 AI 阅读后决定段落划分和截图时间点
-     → 主 AI 直接写入 paragraphs.json：
-       先用文件写工具写入 $WORK/paragraphs.json
-       再执行：node video_to_feishu.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
+  3. AI 语义分析（主 AI 读 segments.json 后写入 paragraphs.json）
+     node scripts/video_to_joyspace.js --step analyze --work-dir $WORK
+     node scripts/video_to_joyspace.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
 
-  4. 精准截帧（按 AI 指定时间点）
-     node video_to_feishu.js --step frames --work-dir $WORK
+  4. 精准截帧
+     node scripts/video_to_joyspace.js --step frames --work-dir $WORK
 
-  4.5 [可选] AI 文字优化（修正转录错误）
-     node video_to_feishu.js --step polish --work-dir $WORK
-     → 打印段落文案，由主 AI 修正 Whisper 同音字、专有名词错误、错别字
-     → 主 AI 将修改后的 paragraphs.json 写回原路径
+  4.5 [可选] AI 文字优化
+     node scripts/video_to_joyspace.js --step polish --work-dir $WORK
 
-  5. 写入飞书文档（完成后自动记录到多维表格，如已配置）
-     node video_to_feishu.js --step write --title "视频标题" --work-dir $WORK
-     → 当前任务结束后保留工作目录，便于失败排查或继续重试。
-     → 新任务启动（--full 或 --step download）时，会默认清理旧的 /tmp/douyin_task_* 目录；如需跳过，追加 --no-cleanup-old。
-
-  6. [可选] 单独记录到多维表格
-     node video_to_feishu.js --step log --work-dir $WORK \\
-       --bitable-token <app_token> --bitable-table <table_id> \\
-       --doc-url "https://my.feishu.cn/docx/xxx" \\
-       --source-url "https://v.douyin.com/xxx" \\
-       --author "作者名" --platform 抖音 --video-type 知识讲解
+  5. 组装 final_markdown.md（脚本到此为止；由主 AI 调 MCP create_doc_routing 创建 JoySpace 文档）
+     node scripts/video_to_joyspace.js --step write --title "视频标题" --work-dir $WORK
 
 环境变量：
-  FEISHU_APP_ID       飞书应用 ID（必须，--step write 时检测）
-  FEISHU_APP_SECRET   飞书应用密钥（必须）
-  FEISHU_MEMBER_OPENID 可选，文档创建后自动转移所有者到该 openid
-  FEISHU_MEMBER_ID    同上（兼容别名）
-  OPENAI_API_KEY      本地 whisper 不可用时的备用 Whisper API
-  YTDLP_COOKIES       yt-dlp cookies.txt 路径（部分平台/内容需要登录）
-  YTDLP_COOKIES_FROM_BROWSER 从浏览器读取 cookies，例如 chrome / safari
-  TRANSCRIBE_CHUNK_SEC 转录分段阈值（秒，音频时长 > 此值才切 chunk；默认 600）
-  BITABLE_APP_TOKEN   多维表格 app_token（配置后 write 完成自动记录）
-  BITABLE_TABLE_ID    多维表格数据表 ID
-  CLEAN_OLD_WORK_DIRS 新任务启动时是否清理旧 /tmp/douyin_task_* 目录（默认 1）
+  OPENAI_API_KEY            本地 whisper 不可用时的备用 Whisper API
+  YTDLP_COOKIES             yt-dlp cookies.txt 路径
+  YTDLP_COOKIES_FROM_BROWSER  从浏览器读取 cookies，例如 chrome
+  TRANSCRIBE_CHUNK_SEC      转录分段阈值（秒，默认 600）
+  CLEAN_OLD_WORK_DIRS       新任务启动时是否清理旧 /tmp/douyin_task_* 目录（默认 1）
     `);
   }
 }
