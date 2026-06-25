@@ -624,7 +624,7 @@ async function stepDownloadDouyin(url, platform = detectPlatform(url)) {
   const parserPath = path.join(SCRIPTS_DIR, 'douyin_video_parser.py');
   if (!fs.existsSync(parserPath)) {
     console.error(`❌ 未找到 douyin_video_parser.py，路径：${parserPath}`);
-    console.error('   请确认 skill 完整性，或重新安装 video-to-feishu skill');
+    console.error('   请确认 skill 完整性，或重新安装 video-to-joyspace skill');
     process.exit(1);
   }
 
@@ -1541,7 +1541,7 @@ function stepWriteParagraphs(dataStr, filePath) {
 }
 
 // ══════════════════════════════════════
-//  STEP 4.5: AI 文字优化（可选，截帧后写入飞书前）
+//  STEP 4.5: AI 文字优化（可选，截帧后、组装 markdown 前）
 // ══════════════════════════════════════
 /**
  * 打印段落内容供主 AI 优化，并提示主 AI 将优化后结果写回 paragraphs.json。
