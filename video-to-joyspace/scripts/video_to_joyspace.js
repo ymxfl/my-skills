@@ -2,7 +2,7 @@
 /**
  * 多平台视频 → JoySpace 文档 核心脚本
  *
- * 由视频转录流程移植，移除外部平台 API / 凭证 / 媒体上传 / 表格记录逻辑。
+ * 移植自 video_to_feishu.js，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
  * write 步骤改为组装 final_markdown.md（图片/视频上传已注释，JoySpace 暂不支持）。
  * 由主 AI 读取 final_markdown.md 后通过 MCP create_doc_routing 创建 JoySpace 文档。
  *
