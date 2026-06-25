@@ -2,7 +2,7 @@
 /**
  * 多平台视频 → JoySpace 文档 核心脚本
  *
- * 由飞书版脚本移植，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
+ * 由视频转录流程移植，移除外部平台 API / 凭证 / 媒体上传 / 表格记录逻辑。
  * write 步骤改为组装 final_markdown.md（图片/视频上传已注释，JoySpace 暂不支持）。
  * 由主 AI 读取 final_markdown.md 后通过 MCP create_doc_routing 创建 JoySpace 文档。
  *
@@ -512,55 +512,11 @@ async function stepCheck() {
   console.log('\n🔍 [Step 0] 运行环境 & 依赖检测...');
   const result = checkDependencies(false);
 
-  // 检查凭证状态（非强制，只显示状态）
-  console.log('\n── 飞书凭证状态 ──');
-  if (APP_ID && APP_SECRET) {
-    console.log(`  ✅ FEISHU_APP_ID     已配置（${APP_ID}）`);
-    console.log(`  ✅ FEISHU_APP_SECRET 已配置（${APP_SECRET.substring(0, 4)}****）`);
-  } else {
-    if (!APP_ID) console.log('  ❌ FEISHU_APP_ID     未配置');
-    if (!APP_SECRET) console.log('  ❌ FEISHU_APP_SECRET 未配置');
-    console.log('\n  ℹ️  若在 ~/.zshrc 里已写但仍显示未配置，常见原因：');
-    console.log('     1) 须用 export（仅 FEISHU_APP_ID=… 不会传给子进程）');
-    console.log('     2) Node 只继承「启动它的进程」的环境；Cursor Agent / 非交互 shell 往往不执行 .zshrc');
-    console.log('     3) 可把变量放到 ~/.zshenv，或本 skill 根目录的 .env（脚本会自动读取）');
-    console.log('\n  → 在对话中告知 AI："我的飞书 App ID 是 cli_xxx，App Secret 是 yyy"');
-    console.log('  → 或在本终端执行：export FEISHU_APP_ID=cli_xxx（再运行脚本）');
-  }
-  if (FEISHU_MEMBER_OPENID) {
-    console.log(`  ✅ FEISHU_MEMBER_OPENID 已配置（${FEISHU_MEMBER_OPENID}）`);
-  } else {
-    console.log('  ❌ FEISHU_MEMBER_OPENID 未配置');
-    console.log('     （可用 FEISHU_MEMBER_ID 作为兼容别名；未配置时将跳过文档所有者自动转移）');
-  }
-
   console.log('\n── OpenAI 配置状态 ──');
   if (OPENAI_KEY) {
     console.log(`  ✅ OPENAI_API_KEY    已配置（${OPENAI_KEY.substring(0, 6)}****）`);
   } else {
     console.log('  ℹ️  OPENAI_API_KEY    未配置（本地 whisper 可用时不需要）');
-  }
-
-  // 检查多维表格配置（用于自动记录转换日志）
-  const bitableToken = process.env.BITABLE_APP_TOKEN || dotenv.BITABLE_APP_TOKEN;
-  const bitableTable = process.env.BITABLE_TABLE_ID || dotenv.BITABLE_TABLE_ID;
-  console.log('\n── 多维表格配置（可选） ──');
-  if (bitableToken && bitableTable) {
-    console.log(`  ✅ BITABLE_APP_TOKEN 已配置（${bitableToken.substring(0, 10)}****）`);
-    console.log(`  ✅ BITABLE_TABLE_ID  已配置（${bitableTable.substring(0, 8)}****）`);
-    console.log('     → write 步骤完成后会自动记录转换日志');
-  } else {
-    console.log('  ℹ️  多维表格未配置（可选，不影响核心功能）');
-    if (!bitableToken && !bitableTable) {
-      console.log('     如需自动记录转换日志，请提供：');
-      console.log('     BITABLE_APP_TOKEN：多维表格的 app_token');
-      console.log('     BITABLE_TABLE_ID：数据表的 table_id');
-      console.log('     可在 .env 文件中配置，或告知 AI "我的多维表格配置是..."');
-    } else if (!bitableToken) {
-      console.log('     ❌ BITABLE_APP_TOKEN 未配置');
-    } else {
-      console.log('     ❌ BITABLE_TABLE_ID 未配置');
-    }
   }
 
   // 显示当前分段时长配置
