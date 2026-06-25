@@ -58,12 +58,9 @@ No JoySpace credentials, token, owner transfer, bitable, or media upload in the 
 
 The script never contacts JoySpace. After `write`, the main AI reads `final_markdown.md` and calls MCP `create_doc_routing` (title + content), then reports `https://joyspace.jd.com/pages/{page_id}`.
 
-### Local-file handling (extension for verification)
+### Download (unchanged from feishu)
 
-The feishu `download` step only handles platform URLs; a local file path falls through to yt-dlp, which cannot process it. Since verification uses a local desktop file, `stepDownload` gains a `local` path:
-
-- `detectPlatform(input)`: existing platform regex checks (douyin/bilibili/kuaishou/weibo/xiaohongshu) evaluated first against the extracted URL — so platform share links are never misread as local files. Then, before the `other` fallback, if `fs.existsSync(input)` and it is a file → `{ key: 'local', label: '本地文件', url: input }`. (A platform URL like `https://...` never exists as a path, so the order is safe.)
-- `stepDownload`: `key === 'local'` → copy file to `$WORK/video.mp4`, write `video_meta.json` (`{ platform: 'local', platform_key: 'local', title, author: '', duration, url }`), return the video path. Falls through to existing douyin/kuaishou/yt-dlp logic otherwise.
+The feishu `download` step handles platform URLs/share text via `detectPlatform` → `stepDownloadDouyin` / `stepDownloadKuaishou` / `stepDownloadWithYtDlp`. These are ported verbatim — no local-file path is added. Verification uses a Douyin share link, which the existing douyin parser handles.
 
 ## Data Flow
 
@@ -88,20 +85,20 @@ Same posture as feishu:
 
 ## Testing / Verification
 
-Run the full pipeline on the local test video `/Users/lizhenhua.81/Desktop/主动添加好友.mp4`:
+Run the full pipeline on a Douyin share link (`https://v.douyin.com/9yo-MbPcDYI/`):
 
 ```bash
 WORK=/tmp/video_to_joyspace_task
 node scripts/video_to_joyspace.js --step check
-node scripts/video_to_joyspace.js --step download --url "/Users/lizhenhua.81/Desktop/主动添加好友.mp4" --work-dir "$WORK" --no-cleanup-old
+node scripts/video_to_joyspace.js --step download --url "https://v.douyin.com/9yo-MbPcDYI/" --work-dir "$WORK" --no-cleanup-old
 node scripts/video_to_joyspace.js --step transcribe --work-dir "$WORK" --no-cleanup-old
 node scripts/video_to_joyspace.js --step write-paragraphs --file "$WORK/paragraphs.json" --work-dir "$WORK" --no-cleanup-old
 node scripts/video_to_joyspace.js --step frames --work-dir "$WORK" --no-cleanup-old
-node scripts/video_to_joyspace.js --step write --title "主动添加好友" --work-dir "$WORK" --no-cleanup-old
+node scripts/video_to_joyspace.js --step write --title "Greg - 红包裂变工具" --work-dir "$WORK" --no-cleanup-old
 ```
 
 **Success criteria:**
-- `download` copies the local file to `$WORK/video.mp4` and writes `video_meta.json` with `platform: 'local'`.
+- `download` fetches the Douyin video via `douyin_video_parser.py` to `$WORK/video.mp4` and writes `video_meta.json` with `platform: '抖音'`.
 - `transcribe` produces `segments.json`.
 - `write-paragraphs` (AI-assisted) produces `paragraphs.json`.
 - `frames` produces `frames/*.jpg`.

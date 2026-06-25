@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Port the proven `video-to-feishu` pipeline into a `video-to-joyspace` skill whose `write` step produces a local `final_markdown.md` (image/video upload commented out), verifiable end-to-end on a local desktop video.
+**Goal:** Port the proven `video-to-feishu` pipeline into a `video-to-joyspace` skill whose `write` step produces a local `final_markdown.md` (image/video upload commented out), verifiable end-to-end on a Douyin share link.
 
-**Architecture:** A single Node.js CLI script `scripts/video_to_joyspace.js` with `--step`-driven steps (check → download → transcribe → write-paragraphs → polish → frames → write). The script is a surgical port of `video-to-feishu/scripts/video_to_feishu.js`: retain download/transcribe/frames verbatim, strip all Feishu API/token/media-upload/bitable code, and rewrite `stepWrite` to assemble Markdown locally. A small local-file path is added to `download` so a desktop `.mp4` can drive verification.
+**Architecture:** A single Node.js CLI script `scripts/video_to_joyspace.js` with `--step`-driven steps (check → download → transcribe → write-paragraphs → polish → frames → write). The script is a surgical port of `video-to-feishu/scripts/video_to_feishu.js`: retain download/transcribe/frames verbatim, strip all Feishu API/token/media-upload/bitable code, and rewrite `stepWrite` to assemble Markdown locally. Download logic (抖音/快手/yt-dlp) is ported unchanged — verification uses a Douyin share link.
 
 **Tech Stack:** Node.js (`child_process`, `fs`, `path`, `stream`), `ffmpeg`, `whisper`/`faster-whisper`, `python3`, `yt-dlp`. Tests use `node:assert` in throwaway scripts (no framework).
 
@@ -15,8 +15,9 @@
 - JoySpace is never contacted by the script. The `write` step writes `$WORK/final_markdown.md` only.
 - The original-video upload (`FILE`) and per-paragraph screenshot upload (`IMG`) call sites must remain as commented blocks preserving the file paths (for future restoration), not deleted silently.
 - Screenshots are still generated and kept in `$WORK/frames/`.
+- Download logic (detectPlatform / stepDownloadDouyin / stepDownloadKuaishou / stepDownloadWithYtDlp) is ported verbatim from feishu — NO local-file branch is added.
 - Match the existing feishu script's style: same header-comment density, `getArg`/`hasFlag` arg parsing, `loadDotEnv`, workdir auto-detection, `console.log` step banners.
-- Verification target video: `/Users/lizhenhua.81/Desktop/主动添加好友.mp4` (local file, 66 MB).
+- Verification target: Douyin share link `https://v.douyin.com/9yo-MbPcDYI/` (Greg - 红包裂变工具).
 - Today's date for any timestamps in commits/messages: 2026-06-25.
 
 ---
@@ -45,7 +46,7 @@ Replace the header block (lines 2–44 in the feishu original) so it describes J
 /**
  * 多平台视频 → JoySpace 文档 核心脚本
  *
- * 移植自 video-to_feishu.js，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
+ * 移植自 video_to_feishu.js，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
  * write 步骤改为组装 final_markdown.md（图片/视频上传已注释，JoySpace 暂不支持）。
  * 由主 AI 读取 final_markdown.md 后通过 MCP create_doc_routing 创建 JoySpace 文档。
  *
@@ -55,7 +56,7 @@ Replace the header block (lines 2–44 in the feishu original) so it describes J
  * 用法（分步，必须用同一 --work-dir 共享中间文件）：
  *   WORK=/tmp/video_to_joyspace_task
  *   node scripts/video_to_joyspace.js --step check
- *   node scripts/video_to_joyspace.js --step download   --url "<链接或本地文件路径>" --work-dir $WORK
+ *   node scripts/video_to_joyspace.js --step download   --url "<链接或分享文案>" --work-dir $WORK
  *   node scripts/video_to_joyspace.js --step transcribe                            --work-dir $WORK
  *   node scripts/video_to_joyspace.js --step analyze                               --work-dir $WORK
  *   node scripts/video_to_joyspace.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
@@ -111,7 +112,7 @@ After deletion, verify no Feishu references remain in a function body:
 
 ```bash
 cd video-to-joyspace/scripts
-grep -nE "getFeishuToken|fetchWithRetry|checkFeishuCredentials|writeMarkdown|parseBold|addBlock|writeSemanticSection|multipartBody|uploadMedia|transferDocOwner|stepLogToBitable|\bIMG\(|\bFILE\(|\\bP\(|\\bH1\(|\\bH2\(|\\bBR\(" video_to_joyspace.js
+grep -nE "getFeishuToken|fetchWithRetry|checkFeishuCredentials|writeMarkdown|parseBold|addBlock|writeSemanticSection|multipartBody|uploadMedia|transferDocOwner|stepLogToBitable" video_to_joyspace.js
 ```
 
 Expected: output is empty (every match was inside a deleted function body). If any match appears in `stepWrite`, `stepCheck`, or `main` (the call sites), leave those for Tasks 2–4 — they will be rewritten/removed there. Note any stray references to fix in those tasks.
@@ -130,129 +131,7 @@ git commit -m "Scaffold video-to-joyspace script from feishu, strip Feishu funct
 
 ---
 
-### Task 2: Add local-file detection and download
-
-**Files:**
-- Modify: `video-to-joyspace/scripts/video_to_joyspace.js` (`detectPlatform` ~line 263, `stepDownload` ~line 1054)
-- Test: `video-to-joyspace/scripts/test_detect_local.js` (throwaway, not committed)
-
-**Interfaces:**
-- Consumes: `extractFirstUrl`, `fs`, `path` (already imported/defined in the script).
-- Produces: `detectPlatform(input)` returns `{ key: 'local', label: '本地文件', url: <abs path> }` for an existing local file; `stepDownload` copies a local file to `$WORK/video.mp4` and writes `video_meta.json` with `platform: 'local'`.
-
-- [ ] **Step 1: Write the failing test for local-file detection**
-
-Create `video-to-joyspace/scripts/test_detect_local.js`:
-
-```js
-const assert = require('assert');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-
-// Load the script's functions by requiring it as a module is not possible (it runs main()).
-// Instead, re-implement a thin test by sourcing detectPlatform via eval of the function source.
-const src = fs.readFileSync(path.join(__dirname, 'video_to_joyspace.js'), 'utf-8');
-const m = src.match(/function detectPlatform\(input\) \{[\s\S]*?\n\}/);
-assert(m, 'detectPlatform not found in script');
-const extractFn = src.match(/function extractFirstUrl[\s\S]*?\n\}/);
-const sandbox = { fs, path };
-const wrapped = `${extractFn ? extractFn[0] : ''}${m[0]}`;
-eval(wrapped); // defines detectPlatform (and extractFirstUrl) in this scope
-
-// local file
-const tmp = path.join(os.tmpdir(), 'vtj_test_local.mp4');
-fs.writeFileSync(tmp, 'x');
-const r1 = detectPlatform(tmp);
-assert.strictEqual(r1.key, 'local', `expected local, got ${r1.key}`);
-assert.strictEqual(r1.url, tmp);
-
-// platform URL must NOT be treated as local
-const r2 = detectPlatform('https://v.douyin.com/abc123/');
-assert.strictEqual(r2.key, 'douyin', `expected douyin, got ${r2.key}`);
-
-fs.unlinkSync(tmp);
-console.log('OK: detectPlatform local + douyin');
-```
-
-- [ ] **Step 2: Run the test to verify it fails**
-
-Run: `node video-to-joyspace/scripts/test_detect_local.js`
-Expected: FAIL — `detectPlatform` returns `{ key: 'other' }` for the local file (current feishu logic has no `local` branch), so `assert.strictEqual(r1.key, 'local')` throws.
-
-- [ ] **Step 3: Add the `local` branch to `detectPlatform`**
-
-In `detectPlatform`, insert a local-file check **before** the final `return { key: 'other', ... }` (so platform regexes are evaluated first for URLs, then local path, then `other`). Replace the trailing `return { key: 'other', label: '其他', url };` with:
-
-```js
-  // 本地文件：URL 不可能是真实路径，放在平台正则之后、other 之前
-  try {
-    if (fs.existsSync(url) && fs.statSync(url).isFile()) {
-      return { key: 'local', label: '本地文件', url };
-    }
-  } catch {}
-  return { key: 'other', label: '其他', url };
-```
-
-- [ ] **Step 4: Run the test to verify it passes**
-
-Run: `node video-to-joyspace/scripts/test_detect_local.js`
-Expected: `OK: detectPlatform local + douyin`
-
-- [ ] **Step 5: Add the `local` branch to `stepDownload`**
-
-In `stepDownload`, insert a local-file branch immediately after `const platform = detectPlatform(url);` and before the `if (platform.key === 'douyin')` check:
-
-```js
-  if (platform.key === 'local') {
-    const srcPath = path.resolve(platform.url);
-    if (!fs.existsSync(srcPath)) {
-      console.error('❌ 本地文件不存在:', srcPath);
-      process.exit(1);
-    }
-    fs.copyFileSync(srcPath, VIDEO_PATH);
-    // 推断标题（文件名去扩展名）
-    const baseTitle = path.basename(srcPath, path.extname(srcPath));
-    fs.writeFileSync(
-      path.join(WORK_DIR, 'video_meta.json'),
-      JSON.stringify({
-        platform: '本地文件',
-        platform_key: 'local',
-        title: baseTitle,
-        author: '',
-        duration: '',
-        url: srcPath,
-      }, null, 2),
-      'utf-8'
-    );
-    console.log(`  ✅ 已复制本地视频到工作目录: ${VIDEO_PATH}`);
-    return VIDEO_PATH;
-  }
-```
-
-> Note: `VIDEO_PATH` and `WORK_DIR` are existing constants in the script (defined near the workdir logic, ~line 160+). If `VIDEO_PATH` is named differently, use whatever constant the douyin/yt-dlp branches write to — match the surrounding code. Verify with: `grep -n "VIDEO_PATH\s*=" video-to-joyspace/scripts/video_to_joyspace.js`.
-
-- [ ] **Step 6: Syntax check and clean up the test**
-
-Run: `node -c video-to-joyspace/scripts/video_to_joyspace.js`
-Expected: no errors.
-
-Delete the throwaway test (do not commit it):
-
-```bash
-rm video-to-joyspace/scripts/test_detect_local.js
-```
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add video-to-joyspace/scripts/video_to_joyspace.js
-git commit -m "Add local-file detection and download to video-to-joyspace"
-```
-
----
-
-### Task 3: Rewrite `stepWrite` to assemble `final_markdown.md`
+### Task 2: Rewrite `stepWrite` to assemble `final_markdown.md`
 
 **Files:**
 - Modify: `video-to-joyspace/scripts/video_to_joyspace.js` (`stepWrite` ~line 2092)
@@ -387,8 +266,12 @@ Replace the help banner and env-var list so they describe JoySpace and omit Feis
 流程（按顺序，--work-dir 共享同一目录）：
   WORK=/tmp/video_to_joyspace_task
 
-  1. 下载视频（支持本地文件路径或平台链接/分享文案）
-     node scripts/video_to_joyspace.js --step download --url "<链接或本地路径>" --work-dir $WORK
+  1. 下载视频（平台链接或分享文案）
+     node scripts/video_to_joyspace.js --step download --url "<链接或分享文案>" --work-dir $WORK
+     → 抖音：使用内置 douyin_video_parser
+     → 快手：使用公开分享页解析器
+     → 哔哩哔哩/微博/小红书：使用 yt-dlp
+     → 如内容需要登录，可配置 YTDLP_COOKIES 或 YTDLP_COOKIES_FROM_BROWSER=chrome
 
   2. 本地 Whisper 转录
      node scripts/video_to_joyspace.js --step transcribe --work-dir $WORK
@@ -428,7 +311,7 @@ git commit -m "Rewrite stepWrite to assemble final_markdown.md; drop log/bitable
 
 ---
 
-### Task 4: Trim `stepCheck` to drop Feishu credentials and bitable
+### Task 3: Trim `stepCheck` to drop Feishu credentials and bitable
 
 **Files:**
 - Modify: `video-to-joyspace/scripts/video_to_joyspace.js` (`stepCheck` ~line 958)
@@ -468,13 +351,13 @@ git commit -m "Trim stepCheck: drop Feishu credentials and bitable sections"
 
 ---
 
-### Task 5: End-to-end verification on the local desktop video
+### Task 4: End-to-end verification on the Douyin share link
 
 **Files:**
 - No file changes (verification only). The pipeline writes to `/tmp/video_to_joyspace_task`.
 
 **Interfaces:**
-- Consumes: the completed `video_to_joyspace.js` and the local video `/Users/lizhenhua.81/Desktop/主动添加好友.mp4`.
+- Consumes: the completed `video_to_joyspace.js` and the Douyin share link `https://v.douyin.com/9yo-MbPcDYI/`.
 - Produces: evidence that the full pipeline runs and `final_markdown.md` has the expected structure.
 
 - [ ] **Step 1: Run environment check**
@@ -485,23 +368,23 @@ node scripts/video_to_joyspace.js --step check
 ```
 Expected: dependency status printed; no Feishu/bitable sections; exits 0 (or pauses for chunk-sec config if unset — if it pauses, re-run with `--transcribe-chunk-sec 600`).
 
-- [ ] **Step 2: Download (local file copy)**
+- [ ] **Step 2: Download (Douyin share link)**
 
 ```bash
 WORK=/tmp/video_to_joyspace_task
 node scripts/video_to_joyspace.js --step download \
-  --url "/Users/lizhenhua.81/Desktop/主动添加好友.mp4" \
+  --url "https://v.douyin.com/9yo-MbPcDYI/" \
   --work-dir "$WORK" --no-cleanup-old
 ```
-Expected: `✅ 已复制本地视频到工作目录: /tmp/video_to_joyspace_task/video.mp4`; `video_meta.json` written with `platform_key: 'local'`.
-Verify: `cat "$WORK/video_meta.json"` shows `"platform_key": "local"`.
+Expected: douyin parser fetches the video to `$WORK/video.mp4`; `video_meta.json` written with `platform: '抖音'`.
+Verify: `cat "$WORK/video_meta.json"` shows `"platform_key": "douyin"` and a title.
 
 - [ ] **Step 3: Transcribe**
 
 ```bash
 node scripts/video_to_joyspace.js --step transcribe --work-dir "$WORK" --no-cleanup-old
 ```
-Expected: `segments.json` produced in `$WORK`. (Local whisper; may take several minutes for 66 MB. If whisper missing, the script prints install guidance — install `faster-whisper`/`whisper` and rerun.)
+Expected: `segments.json` produced in `$WORK`. (Local whisper; may take several minutes. If whisper missing, the script prints install guidance — install `faster-whisper`/`whisper` and rerun.)
 
 - [ ] **Step 4: AI semantic analysis (manual gate)**
 
@@ -523,7 +406,7 @@ Expected: `$WORK/frames/*.jpg` created, one per paragraph that has `screenshot_a
 - [ ] **Step 6: Write — assemble final_markdown.md**
 
 ```bash
-node scripts/video_to_joyspace.js --step write --title "主动添加好友" --work-dir "$WORK" --no-cleanup-old
+node scripts/video_to_joyspace.js --step write --title "Greg - 红包裂变工具" --work-dir "$WORK" --no-cleanup-old
 ```
 Expected: `✅ 已生成: /tmp/video_to_joyspace_task/final_markdown.md`.
 
@@ -533,7 +416,7 @@ Run this verification block:
 ```bash
 MD=/tmp/video_to_joyspace_task/final_markdown.md
 test -f "$MD" && echo "PASS: file exists" || echo "FAIL: file missing"
-head -1 "$MD" | grep -q "^# 主动添加好友$" && echo "PASS: H1 title" || echo "FAIL: H1 title"
+head -1 "$MD" | grep -q "^# Greg - 红包裂变工具$" && echo "PASS: H1 title" || echo "FAIL: H1 title"
 grep -q "## " "$MD" && echo "PASS: has H2 sections" || echo "FAIL: no H2 sections"
 grep -q "JoySpace 暂不支持上传本地视频" "$MD" && echo "PASS: video upload commented" || echo "FAIL: video comment missing"
 grep -q "JoySpace 暂不支持上传图片" "$MD" && echo "PASS: image upload commented" || echo "FAIL: image comment missing"
@@ -543,13 +426,13 @@ Expected: all `PASS`; section count 5–10.
 
 - [ ] **Step 8: Report and (optional) create the live JoySpace doc**
 
-Report the verification results (which steps passed, section count). Since the JoySpace MCP write path needs no credentials and was already verified working this session, optionally read `$WORK/final_markdown.md` and call MCP `create_doc_routing` with `title="主动添加好友"`, `team_id="root"`, `folder_id="root"`, `content=<file contents>`, then report `https://joyspace.jd.com/pages/{page_id}`. This is optional and not part of the script.
+Report the verification results (which steps passed, section count). Since the JoySpace MCP write path needs no credentials and was already verified working this session, optionally read `$WORK/final_markdown.md` and call MCP `create_doc_routing` with `title="Greg - 红包裂变工具"`, `team_id="root"`, `folder_id="root"`, `content=<file contents>`, then report `https://joyspace.jd.com/pages/{page_id}`. This is optional and not part of the script.
 
 - [ ] **Step 9: Final commit (skill metadata if anything changed)**
 
 If SKILL.md / references need touch-ups discovered during verification, commit them:
 ```bash
 git add video-to-joyspace
-git commit -m "Verify video-to-joyspace end-to-end on local video"
+git commit -m "Verify video-to-joyspace end-to-end on Douyin share link"
 ```
-Otherwise no commit needed (script changes were committed in Tasks 1–4).
+Otherwise no commit needed (script changes were committed in Tasks 1–3).
