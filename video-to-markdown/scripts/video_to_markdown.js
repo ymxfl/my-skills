@@ -1,26 +1,24 @@
 #!/usr/bin/env node
 /**
- * 多平台视频 → JoySpace 文档 核心脚本
+ * 多平台视频 → 本地 Markdown 文案 核心脚本
  *
- * 移植自 video_to_feishu.js，移除飞书 API / 凭证 / 媒体上传 / 多维表格逻辑。
- * write 步骤改为组装 final_markdown.md（图片/视频上传已注释，JoySpace 暂不支持）。
- * 由主 AI 读取 final_markdown.md 后通过 MCP create_doc_routing 创建 JoySpace 文档。
+ * 派生自 video_to_joyspace.js，移除媒体上传 / 截帧 / JoySpace MCP / OpenAI 回退逻辑。
+ * 仅本地转录（faster-whisper / whisper）。write 步骤组装纯文本 output.md。
  *
  * 整体流程：
- *   check → download → transcribe → analyze(AI) → frames → write
+ *   check → download → audio → transcribe → analyze(AI) → write
  *
  * 用法（分步，必须用同一 --work-dir 共享中间文件）：
- *   WORK=/tmp/video_to_joyspace_task
- *   node scripts/video_to_joyspace.js --step check
- *   node scripts/video_to_joyspace.js --step download   --url "<链接或分享文案>" --work-dir $WORK
- *   node scripts/video_to_joyspace.js --step transcribe                            --work-dir $WORK
- *   node scripts/video_to_joyspace.js --step analyze                               --work-dir $WORK
- *   node scripts/video_to_joyspace.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
- *   node scripts/video_to_joyspace.js --step frames                                --work-dir $WORK
- *   node scripts/video_to_joyspace.js --step write      --title "标题"             --work-dir $WORK
+ *   WORK=/tmp/video_to_markdown_task
+ *   node scripts/video_to_markdown.js --step check
+ *   node scripts/video_to_markdown.js --step download --url "<链接或分享文案>" --work-dir $WORK
+ *   node scripts/video_to_markdown.js --step audio                              --work-dir $WORK
+ *   node scripts/video_to_markdown.js --step transcribe                         --work-dir $WORK
+ *   node scripts/video_to_markdown.js --step analyze                            --work-dir $WORK
+ *   node scripts/video_to_markdown.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
+ *   node scripts/video_to_markdown.js --step write      --title "标题"          --work-dir $WORK
  *
  * 可选配置：
- *   OPENAI_API_KEY           本地 whisper 不可用时的备用 Whisper API
  *   YTDLP_COOKIES            yt-dlp cookies.txt 路径
  *   YTDLP_COOKIES_FROM_BROWSER  从浏览器读取 cookies，例如 chrome
  *   TRANSCRIBE_CHUNK_SEC     转录分段阈值（秒，默认 600）
@@ -67,7 +65,6 @@ function loadDotEnv() {
 }
 const dotenv = loadDotEnv();
 
-const OPENAI_KEY    = process.env.OPENAI_API_KEY || dotenv.OPENAI_API_KEY;
 const YTDLP_COOKIES = getArg('--ytdlp-cookies') || process.env.YTDLP_COOKIES || dotenv.YTDLP_COOKIES;
 const YTDLP_COOKIES_FROM_BROWSER = getArg('--ytdlp-cookies-from-browser')
   || process.env.YTDLP_COOKIES_FROM_BROWSER
@@ -139,6 +136,7 @@ const _ts           = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 14
 const WORK_DIR      = getArg('--work-dir', `/tmp/douyin_task_${_ts}`);
 
 const VIDEO_PATH    = getArg('--video',        path.join(WORK_DIR, 'video.mp4'));
+const AUDIO_PATH    = getArg('--audio',        path.join(WORK_DIR, 'audio.mp3'));
 const SEGMENTS_PATH = getArg('--segments',     path.join(WORK_DIR, 'segments.json'));
 const PARAGRAPHS_PATH = getArg('--paragraphs', path.join(WORK_DIR, 'paragraphs.json'));
 const FRAMES_DIR    = getArg('--frames',        path.join(WORK_DIR, 'frames'));
