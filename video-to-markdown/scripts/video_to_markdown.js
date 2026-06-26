@@ -46,7 +46,7 @@ const SKILL_ROOT    = path.dirname(SCRIPTS_DIR);
 
 /**
  * 读取 .env：先 skill 根目录，再 cwd；后者覆盖前者。
- * 这样无论从仓库哪一级执行 node scripts/video_to_joyspace.js，都能加载凭证。
+ * 这样无论从仓库哪一级执行 node scripts/video_to_markdown.js，都能加载凭证。
  */
 function loadDotEnv() {
   const paths = [
@@ -551,7 +551,7 @@ async function stepDownloadDouyin(url, platform = detectPlatform(url)) {
   const parserPath = path.join(SCRIPTS_DIR, 'douyin_video_parser.py');
   if (!fs.existsSync(parserPath)) {
     console.error(`❌ 未找到 douyin_video_parser.py，路径：${parserPath}`);
-    console.error('   请确认 skill 完整性，或重新安装 video-to-joyspace skill');
+    console.error('   请确认 skill 完整性，或重新安装 video-to-markdown skill');
     process.exit(1);
   }
 
@@ -1305,10 +1305,10 @@ async function stepAnalyze(segmentsPath) {
  * 辅助工具：将主 AI 分析结果写入 paragraphs.json
  *
  * 推荐用法（稳定）：先用文件写工具把 JSON 写到文件，再传文件路径
- *   node video_to_joyspace.js --step write-paragraphs --file /tmp/douyin_task/paragraphs.json
+ *   node video_to_markdown.js --step write-paragraphs --file /tmp/douyin_task/paragraphs.json
  *
  * 也支持 --data 传字符串（仅内容不含特殊字符时可用）：
- *   node video_to_joyspace.js --step write-paragraphs --data '<JSON>'
+ *   node video_to_markdown.js --step write-paragraphs --data '<JSON>'
  *
  * 说明：--data 方式在段落文本含中文引号、换行符等特殊字符时，Shell 会破坏 JSON 结构，
  *       导致解析失败。推荐始终使用 --file 方式，先直接写文件再执行此命令。
@@ -1340,7 +1340,7 @@ function stepWriteParagraphs(dataStr, filePath) {
       console.error('❌ --data JSON 解析失败:', e.message);
       console.error('  提示：如果段落文本含中文引号或换行符，请改用 --file 方式：');
       console.error('  1. 先将 JSON 写入文件（AI 使用文件写工具）');
-      console.error(`  2. 执行：node video_to_joyspace.js --step write-paragraphs --file <文件路径>`);
+      console.error(`  2. 执行：node video_to_markdown.js --step write-paragraphs --file <文件路径>`);
       process.exit(1);
     }
   } else {
@@ -1357,7 +1357,7 @@ function stepWriteParagraphs(dataStr, filePath) {
       console.error('❌ 请提供 --file <路径> 或 --data <JSON>');
       console.error('  推荐方式：');
       console.error('  1. 将 JSON 写入文件（AI 使用文件写工具直接写入）');
-      console.error(`  2. node video_to_joyspace.js --step write-paragraphs --file ${PARAGRAPHS_PATH}`);
+      console.error(`  2. node video_to_markdown.js --step write-paragraphs --file ${PARAGRAPHS_PATH}`);
       process.exit(1);
     }
   }
@@ -1374,18 +1374,13 @@ function stepWriteParagraphs(dataStr, filePath) {
 }
 
 // ══════════════════════════════════════
-//  STEP 5: 组装 final_markdown.md
+//  STEP 5: 组装 output.md
 // ══════════════════════════════════════
 /**
- * 将 paragraphs.json 组装为 JoySpace 文档的 Markdown 文本。
- * 图片/视频上传已注释（JoySpace 暂不支持），但保留文件路径以便未来恢复。
+ * 将 paragraphs.json 组装为纯文本 Markdown：H1 标题 + 每段 H2 摘要小标题 + 正文。
  */
-function buildMarkdown(paragraphs, title, sourceVideoPath) {
+function buildMarkdown(paragraphs, title) {
   let md = `# ${title}\n\n`;
-
-  // ── 原视频上传（文档开头）— JoySpace 暂不支持，注释保留路径 ──
-  md += `<!-- JoySpace 暂不支持上传本地视频到文档 — 原视频路径: ${sourceVideoPath || '(未找到)'} -->\n\n`;
-
   for (let i = 0; i < paragraphs.length; i++) {
     const p = paragraphs[i];
     const sectionTitle = (p.summary && p.summary.trim())
@@ -1393,28 +1388,21 @@ function buildMarkdown(paragraphs, title, sourceVideoPath) {
       || `段落 ${i + 1}`;
     const sectionBody = (p.text || p.content || '').trim();
     md += `## ${sectionTitle}\n\n${sectionBody}\n\n`;
-
-    // ── 截图上传 — JoySpace 暂不支持，注释保留路径 ──
-    if (p.frame_path) {
-      md += `<!-- JoySpace 暂不支持上传图片到文档 — 截图: ${p.frame_path} -->\n\n`;
-    }
   }
   return md;
 }
 
 async function stepWrite(paragraphsPath, title) {
-  console.log('\n📝 [Step 5] 组装 final_markdown.md ...');
+  console.log('\n📝 [Step 5] 组装 output.md ...');
 
   const paragraphs = JSON.parse(fs.readFileSync(paragraphsPath, 'utf-8'));
-  console.log(`  段落数：${paragraphs.length}，含截图：${paragraphs.filter(p => p.frame_path).length} 张`);
+  console.log(`  段落数：${paragraphs.length}`);
 
-  const sourceVideoPath = resolveVideoPath(paragraphsPath);
-  const md = buildMarkdown(paragraphs, title, sourceVideoPath);
-  const outPath = path.join(WORK_DIR, 'final_markdown.md');
+  const md = buildMarkdown(paragraphs, title);
+  const outPath = path.join(WORK_DIR, 'output.md');
   fs.writeFileSync(outPath, md, 'utf-8');
 
   console.log(`  ✅ 已生成: ${outPath}`);
-  console.log('  ℹ️  下一步：主 AI 读取该文件，调用 MCP create_doc_routing 创建 JoySpace 文档');
   return outPath;
 }
 
@@ -1426,27 +1414,23 @@ async function main() {
   if (IS_FULL || STEP === 'all' || STEP === 'download') {
     cleanupOldWorkDirs();
   }
-  const needsWorkDir = IS_FULL || ['all', 'download', 'transcribe', 'analyze', 'write-paragraphs', 'polish', 'frames', 'write'].includes(STEP);
+  const needsWorkDir = IS_FULL || ['all', 'download', 'audio', 'transcribe', 'analyze', 'write-paragraphs', 'write'].includes(STEP);
   if (needsWorkDir) {
     fs.mkdirSync(WORK_DIR, { recursive: true });
   }
 
   if (IS_FULL || STEP === 'all') {
-    // 全流程前先做依赖检测
     checkDependencies(true);
     const videoPath   = await stepDownload(DOUYIN_URL);
-    const _segments   = await stepTranscribe(videoPath);
+    const audioPath   = await stepAudio(videoPath);
+    const _segments   = await stepTranscribe(audioPath);
     await stepAnalyze(SEGMENTS_PATH);
-    // 注意：analyze 步骤结束后需要主 AI 写入 paragraphs.json，
-    // 再继续执行 frames 和 write
     if (fs.existsSync(PARAGRAPHS_PATH)) {
-      await stepFrames(videoPath, PARAGRAPHS_PATH);
-      const docUrl = await stepWrite(PARAGRAPHS_PATH, DOC_TITLE);
-      console.log('\n✅ 完整流程结束！', docUrl);
+      const outPath = await stepWrite(PARAGRAPHS_PATH, DOC_TITLE);
+      console.log('\n✅ 完整流程结束！', outPath);
     } else {
-      console.log('\n⏸ 请主 AI 完成语义分析后，继续执行（frames/write 会自动检测最新目录，无需手动指定）：');
-      console.log(`   node video_to_joyspace.js --step frames --work-dir "${WORK_DIR}"`);
-      console.log(`   node video_to_joyspace.js --step write --title "${DOC_TITLE}" --work-dir "${WORK_DIR}"`);
+      console.log('\n⏸ 请主 AI 完成语义分析后，继续执行（write 会自动检测最新目录）：');
+      console.log(`   node video_to_markdown.js --step write --title "${DOC_TITLE}" --work-dir "${WORK_DIR}"`);
     }
 
   } else if (STEP === 'check') {
@@ -1455,8 +1439,11 @@ async function main() {
   } else if (STEP === 'download') {
     await stepDownload(DOUYIN_URL);
 
+  } else if (STEP === 'audio') {
+    await stepAudio(VIDEO_PATH);
+
   } else if (STEP === 'transcribe') {
-    await stepTranscribe(VIDEO_PATH);
+    await stepTranscribe(AUDIO_PATH);
 
   } else if (STEP === 'analyze') {
     await stepAnalyze(SEGMENTS_PATH);
@@ -1466,12 +1453,8 @@ async function main() {
     const filePath = getArg('--file');
     stepWriteParagraphs(dataStr, filePath);
 
-  } else if (STEP === 'polish') {
-    const pPath = getArg('--paragraphs', PARAGRAPHS_PATH);
-    await stepPolish(pPath);
-
-  } else if (STEP === 'frames') {
-    const { path: pPath, autoDetected } = resolveParagraphsPath('frames');
+  } else if (STEP === 'write') {
+    const { path: pPath, autoDetected } = resolveParagraphsPath('write');
     if (autoDetected) {
       console.log('  💡 提示：自动检测到已存在的 paragraphs.json，无需指定 --work-dir 或 --paragraphs');
     }
@@ -1479,56 +1462,39 @@ async function main() {
       console.error('❌ 未找到 paragraphs.json，请先运行 --step analyze 并由主 AI 写入段落数据');
       process.exit(1);
     }
-    const videoPath = resolveVideoPath(pPath);
-    const framesDir = resolveFramesDir(pPath);
-    await stepFrames(videoPath, pPath, framesDir);
-
-  } else if (STEP === 'write') {
-    const { path: pPath, autoDetected } = resolveParagraphsPath('write');
-    if (autoDetected) {
-      console.log('  💡 提示：自动检测到已存在的 paragraphs.json，无需指定 --work-dir 或 --paragraphs');
-    }
-    if (!fs.existsSync(pPath)) {
-      console.error('❌ 未找到 paragraphs.json，请先运行 --step analyze 和 --step frames');
-      process.exit(1);
-    }
     await stepWrite(pPath, DOC_TITLE);
 
   } else {
     console.log(`
-多平台视频 → JoySpace 文档（抖音/快手内置解析 + yt-dlp 多平台下载；写入本地 final_markdown.md）
+多平台视频 → 本地 Markdown 文案（抖音/快手内置解析 + yt-dlp 多平台下载；写入本地 output.md）
 
 环境检测（推荐先运行）：
-  node scripts/video_to_joyspace.js --step check
+  node scripts/video_to_markdown.js --step check
 
 流程（按顺序，--work-dir 共享同一目录）：
-  WORK=/tmp/video_to_joyspace_task
+  WORK=/tmp/video_to_markdown_task
 
   1. 下载视频（平台链接或分享文案）
-     node scripts/video_to_joyspace.js --step download --url "<链接或分享文案>" --work-dir $WORK
+     node scripts/video_to_markdown.js --step download --url "<链接或分享文案>" --work-dir $WORK
      → 抖音：使用内置 douyin_video_parser
      → 快手：使用公开分享页解析器
      → 哔哩哔哩/微博/小红书：使用 yt-dlp
      → 如内容需要登录，可配置 YTDLP_COOKIES 或 YTDLP_COOKIES_FROM_BROWSER=chrome
 
-  2. 本地 Whisper 转录
-     node scripts/video_to_joyspace.js --step transcribe --work-dir $WORK
+  2. 提取音频
+     node scripts/video_to_markdown.js --step audio --work-dir $WORK
 
-  3. AI 语义分析（主 AI 读 segments.json 后写入 paragraphs.json）
-     node scripts/video_to_joyspace.js --step analyze --work-dir $WORK
-     node scripts/video_to_joyspace.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
+  3. 本地 Whisper 转录
+     node scripts/video_to_markdown.js --step transcribe --work-dir $WORK
 
-  4. 精准截帧
-     node scripts/video_to_joyspace.js --step frames --work-dir $WORK
+  4. AI 语义分析 + 文案修正（主 AI 读 segments.json 后写入 paragraphs.json）
+     node scripts/video_to_markdown.js --step analyze --work-dir $WORK
+     node scripts/video_to_markdown.js --step write-paragraphs --file $WORK/paragraphs.json --work-dir $WORK
 
-  4.5 [可选] AI 文字优化
-     node scripts/video_to_joyspace.js --step polish --work-dir $WORK
-
-  5. 组装 final_markdown.md（脚本到此为止；由主 AI 调 MCP create_doc_routing 创建 JoySpace 文档）
-     node scripts/video_to_joyspace.js --step write --title "视频标题" --work-dir $WORK
+  5. 组装 output.md
+     node scripts/video_to_markdown.js --step write --title "视频标题" --work-dir $WORK
 
 环境变量：
-  OPENAI_API_KEY            本地 whisper 不可用时的备用 Whisper API
   YTDLP_COOKIES             yt-dlp cookies.txt 路径
   YTDLP_COOKIES_FROM_BROWSER  从浏览器读取 cookies，例如 chrome
   TRANSCRIBE_CHUNK_SEC      转录分段阈值（秒，默认 600）
