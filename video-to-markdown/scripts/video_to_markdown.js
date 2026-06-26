@@ -973,10 +973,10 @@ async function stepDownloadWithYtDlp(input, platform) {
 }
 
 // ══════════════════════════════════════
-//  STEP 2: 音频提取 + 带时间戳转录
+//  STEP 2: 提取音频（ffmpeg → 16kHz 单声道 mp3）
 // ══════════════════════════════════════
-async function stepTranscribe(videoPath) {
-  console.log('\n🎙️ [Step 2] 提取音频 + 带时间戳转录...');
+async function stepAudio(videoPath) {
+  console.log('\n🎵 [Step 2] 提取音频（16kHz 单声道 mp3）...');
 
   if (!commandExists('ffmpeg')) {
     console.error('❌ ffmpeg 未安装！');
@@ -984,10 +984,32 @@ async function stepTranscribe(videoPath) {
     console.error('   Ubuntu： sudo apt install ffmpeg');
     process.exit(1);
   }
+  if (!fs.existsSync(videoPath)) {
+    console.error(`❌ 未找到视频文件：${videoPath}，请先运行 --step download`);
+    process.exit(1);
+  }
 
-  const audioPath = videoPath.replace(/\.[^.]+$/, '.mp3');
-  runFile('ffmpeg', ['-y', '-i', videoPath, '-ar', '16000', '-ac', '1', '-b:a', '64k', audioPath]);
-  console.log('✅ 音频提取完成:', audioPath);
+  runFile('ffmpeg', ['-y', '-i', videoPath, '-vn', '-ar', '16000', '-ac', '1', '-b:a', '64k', AUDIO_PATH]);
+  console.log('✅ 音频提取完成:', AUDIO_PATH);
+  return AUDIO_PATH;
+}
+
+// ══════════════════════════════════════
+//  STEP 3: 带时间戳转录
+// ══════════════════════════════════════
+async function stepTranscribe(audioPath) {
+  console.log('\n🎙️ [Step 3] 带时间戳转录...');
+
+  if (!commandExists('ffmpeg')) {
+    console.error('❌ ffmpeg 未安装！');
+    console.error('   macOS：  brew install ffmpeg');
+    console.error('   Ubuntu： sudo apt install ffmpeg');
+    process.exit(1);
+  }
+  if (!fs.existsSync(audioPath)) {
+    console.error(`❌ 未找到音频文件：${audioPath}，请先运行 --step audio`);
+    process.exit(1);
+  }
 
   let segments = [];
 
@@ -1143,69 +1165,6 @@ with open(json_path, "w", encoding="utf-8") as f:
       console.log(`✅ 本地 whisper CLI chunked 合并完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length - 1]?.end || 0)}`);
     }
 
-    // ── 分段转录：OpenAI Whisper API ──
-    if (segments.length === 0 && OPENAI_KEY) {
-      console.log('  本地分段转录不可用，回退到 OpenAI Whisper API（逐 chunk 调用）...');
-      console.log('  （建议安装 faster-whisper 或本地 whisper：pip3 install faster-whisper）');
-
-      const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-      for (let i = 0; i < chunks.length; i++) {
-        const ch = chunks[i];
-        const chunkIdx1 = i + 1;
-        console.log(`    [chunk ${chunkIdx1}/${chunks.length}] OpenAI 转录中：${path.basename(ch.wavPath)} ...`);
-        try {
-          await delay(650); // 小延迟降低限流
-          const wavFile = fs.readFileSync(ch.wavPath);
-          const b = 'WB' + Date.now() + '_' + i;
-          const fields = [
-            { name: 'model', value: 'whisper-1' },
-            { name: 'language', value: 'zh' },
-            { name: 'response_format', value: 'verbose_json' },
-          ];
-          const headerParts = fields.map(f =>
-            `--${b}\r\nContent-Disposition: form-data; name="${f.name}"\r\n\r\n${f.value}\r\n`
-          ).join('');
-          const fileHeader = `--${b}\r\nContent-Disposition: form-data; name="file"; filename="${path.basename(ch.wavPath)}"\r\nContent-Type: audio/wav\r\n\r\n`;
-          const body = Buffer.concat([
-            Buffer.from(headerParts + fileHeader),
-            wavFile,
-            Buffer.from(`\r\n--${b}--\r\n`)
-          ]);
-
-          const r = await fetch(`${baseUrl}/audio/transcriptions`, {
-            method: 'POST',
-            headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': `multipart/form-data; boundary=${b}` },
-            body
-          });
-          const text = await r.text();
-          let result;
-          try { result = JSON.parse(text); } catch (e) {
-            console.error(`❌ Whisper API 响应解析失败（chunk ${chunkIdx1}）：`, text.substring(0, 200));
-            continue;
-          }
-          if (result.error) {
-            console.warn(`    ⚠️ Whisper API 错误（chunk ${chunkIdx1}）：`, result.error.message);
-            continue;
-          }
-
-          const partSegments = (result.segments || []).map(s => ({
-            start: parseFloat((parseFloat(s.start) + ch.offsetSec).toFixed(2)),
-            end: parseFloat((parseFloat(s.end) + ch.offsetSec).toFixed(2)),
-            text: (s.text || '').trim()
-          })).filter(s => s.text.length > 0);
-          segments.push(...partSegments);
-        } catch (e) {
-          console.warn(`    ⚠️ OpenAI chunk ${chunkIdx1} 转录异常：`, e.message);
-        } finally {
-          try { if (fs.existsSync(ch.wavPath)) fs.unlinkSync(ch.wavPath); } catch {}
-          await delay(250);
-        }
-      }
-
-      segments.sort((a, b) => a.start - b.start);
-      console.log(`✅ OpenAI chunked 转录合并完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length - 1]?.end || 0)}`);
-    }
-
     // 再兜底清理 chunk wav（有些路径会提前清理，但确保不残留）
     try {
       for (const ch of chunks) {
@@ -1280,68 +1239,20 @@ with open(json_path, "w", encoding="utf-8") as f:
         })).filter(s => s.text.length > 0);
         console.log(`✅ 本地 whisper 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
       } catch (e) {
-        console.warn('⚠️  本地 whisper 失败，准备尝试 OpenAI Whisper API：', e.message);
+        console.warn('⚠️  本地 whisper 转录失败：', e.message);
       }
-    }
-
-    // 最终回退：OpenAI Whisper API
-    if (segments.length === 0 && OPENAI_KEY) {
-      console.log('  本地转录不可用，回退到 OpenAI Whisper API...');
-      console.log('  （建议安装 faster-whisper：pip3 install faster-whisper）');
-      const audioFile = fs.readFileSync(audioPath);
-      const b = 'WB' + Date.now();
-      const fields = [
-        { name: 'model',           value: 'whisper-1' },
-        { name: 'language',        value: 'zh' },
-        { name: 'response_format', value: 'verbose_json' },
-      ];
-      const headerParts = fields.map(f =>
-        `--${b}\r\nContent-Disposition: form-data; name="${f.name}"\r\n\r\n${f.value}\r\n`
-      ).join('');
-      const fileHeader = `--${b}\r\nContent-Disposition: form-data; name="file"; filename="audio.mp3"\r\nContent-Type: audio/mpeg\r\n\r\n`;
-      const body = Buffer.concat([
-        Buffer.from(headerParts + fileHeader),
-        audioFile,
-        Buffer.from(`\r\n--${b}--\r\n`)
-      ]);
-      const baseUrl = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-      const r = await fetch(`${baseUrl}/audio/transcriptions`, {
-        method: 'POST',
-        headers: { 'Authorization': 'Bearer ' + OPENAI_KEY, 'Content-Type': `multipart/form-data; boundary=${b}` },
-        body
-      });
-      const text = await r.text();
-      let result;
-      try { result = JSON.parse(text); } catch (e) {
-        console.error('❌ Whisper API 响应解析失败:', text.substring(0, 200));
-        process.exit(1);
-      }
-      if (result.error) { console.error('❌ Whisper API 错误:', result.error.message); process.exit(1); }
-      segments = (result.segments || []).map(s => ({
-        start: parseFloat(s.start.toFixed(2)),
-        end:   parseFloat(s.end.toFixed(2)),
-        text:  s.text.trim()
-      })).filter(s => s.text.length > 0);
-      console.log(`✅ API 转录完成，共 ${segments.length} 段，时长 ${fmtTime(segments[segments.length-1]?.end || 0)}`);
     }
   }
 
   if (segments.length === 0) {
     console.error(`
-❌ 转录失败：本地 faster-whisper/whisper 不可用，且未配置 OPENAI_API_KEY
+❌ 转录失败：本地 faster-whisper/whisper 不可用
 
-请选择以下方式之一解决：
-
-【方式 A】安装 faster-whisper（推荐，无需联网）
+请安装 faster-whisper（推荐，无需联网）：
   pip3 install faster-whisper
-  
-  安装完成后重新运行：
-  node video_to_joyspace.js --step transcribe --video "${videoPath}"
 
-【方式 B】配置 OpenAI API Key（在线转录）
-  方法1：在对话中告知 AI："我的 OpenAI API Key 是 sk-xxx"
-  方法2：设置环境变量：export OPENAI_API_KEY=sk-xxxxxxxx
-  方法3：在 .env 文件中添加：OPENAI_API_KEY=sk-xxxxxxxx
+安装完成后重新运行：
+  node video_to_markdown.js --step transcribe --work-dir <WORK_DIR>
 `);
     process.exit(1);
   }
