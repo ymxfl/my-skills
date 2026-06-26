@@ -374,10 +374,9 @@ function checkDependencies(strict = true) {
     console.log('  ❌ python3  未安装');
   }
 
-  // ── 转录依赖（二选一）──────────────────────────────
+  // ── 转录依赖（本地，二选一）────────────────────────
   const hasFasterWhisper = commandExists('python3') && pythonModuleExists('faster_whisper');
   const hasLocalWhisper = commandExists('whisper');
-  const hasOpenAIKey    = !!(OPENAI_KEY);
 
   if (hasFasterWhisper) {
     console.log('  ✅ faster-whisper（本地）  已安装');
@@ -385,12 +384,9 @@ function checkDependencies(strict = true) {
     const v = (() => { try { return execFileSync('whisper', ['--version'], { stdio: 'pipe' }).toString().trim().split('\n')[0]; } catch { return ''; } })();
     console.log(`  ⚠️  faster-whisper 未安装，检测到 whisper（本地）  ${v}`);
     optional.push('faster-whisper');
-  } else if (hasOpenAIKey) {
-    console.log('  ⚠️  本地 faster-whisper/whisper 未安装，将使用 OpenAI Whisper API（需联网）');
-    optional.push('faster-whisper');
   } else {
-    missing.push('faster-whisper（本地）或 OPENAI_API_KEY');
-    console.log('  ❌ faster-whisper  未安装，且未配置 OPENAI_API_KEY');
+    missing.push('faster-whisper（本地）');
+    console.log('  ❌ faster-whisper  未安装');
   }
 
   // ── 多平台下载依赖 ─────────────────────────────────
@@ -427,9 +423,7 @@ function checkDependencies(strict = true) {
     }
     if (missing.some(m => m.startsWith('faster-whisper'))) {
       console.log('  【faster-whisper】本地语音转文字（推荐）');
-      console.log('    pip3 install faster-whisper');
-      console.log('  或者：配置 OpenAI API Key（在线 Whisper API）');
-      console.log('    export OPENAI_API_KEY=sk-xxxxxxxx\n');
+      console.log('    pip3 install faster-whisper\n');
     }
     if (optional.includes('yt-dlp')) {
       console.log('  【yt-dlp】多平台视频下载（B站/微博/小红书）');
@@ -509,13 +503,6 @@ function cleanupOldWorkDirs() {
 async function stepCheck() {
   console.log('\n🔍 [Step 0] 运行环境 & 依赖检测...');
   const result = checkDependencies(false);
-
-  console.log('\n── OpenAI 配置状态 ──');
-  if (OPENAI_KEY) {
-    console.log(`  ✅ OPENAI_API_KEY    已配置（${OPENAI_KEY.substring(0, 6)}****）`);
-  } else {
-    console.log('  ℹ️  OPENAI_API_KEY    未配置（本地 whisper 可用时不需要）');
-  }
 
   // 显示当前分段时长配置
   const chunkSecFromEnv = dotenv.TRANSCRIBE_CHUNK_SEC || process.env.TRANSCRIBE_CHUNK_SEC;
