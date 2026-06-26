@@ -202,20 +202,6 @@ function resolveParagraphsPath(callerStep = 'unknown') {
 }
 
 /**
- * 获取 frames 目录路径（与 resolveParagraphsPath 联动）
- */
-function resolveFramesDir(paragraphsPath) {
-  // 如果用户指定了 --frames，直接使用
-  const framesIdx = args.indexOf('--frames');
-  if (framesIdx !== -1 && args[framesIdx + 1]) {
-    return args[framesIdx + 1];
-  }
-
-  // 自动关联到 paragraphs.json 所在目录
-  return path.join(path.dirname(paragraphsPath), 'frames');
-}
-
-/**
  * 获取 video 路径（与 resolveParagraphsPath 联动）
  */
 function resolveVideoPath(paragraphsPath) {
@@ -1292,10 +1278,11 @@ async function stepAnalyze(segmentsPath) {
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 📌 主 AI 任务：
    1. 阅读以上转录文本，按语义划分段落（建议 5~8 段）
-   2. 为每段推荐截图时间点（选最能体现该段核心内容的时刻，避开开头结尾 3s）
-   3. 为每段写摘要（10~20 字）
+   2. 修正 Whisper 转录错误（同音字、专有名词、明显错别字），保持原意
+   3. 为每段写摘要（10~20 字）作为小标题
    4. 直接将 paragraphs.json 写入 ${PARAGRAPHS_PATH}
-   ⚠️ 注意：后续 frames/write 步骤会自动关联到此工作目录
+      每项格式：{ "start": 秒, "end": 秒, "text": "正文", "summary": "摘要" }
+   ⚠️ 注意：后续 write 步骤会自动关联到此工作目录
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
 
   // 检查 paragraphs.json 是否已由主 AI 写入
@@ -1304,7 +1291,7 @@ async function stepAnalyze(segmentsPath) {
     if (Array.isArray(paragraphs) && paragraphs.length > 0) {
       console.log(`\n✅ 检测到 paragraphs.json（${paragraphs.length} 段）`);
       paragraphs.forEach((p, i) => {
-        console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | 截图@${fmtTime(p.screenshot_at)} | ${p.summary || p.title || ''}`);
+        console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | ${p.summary || p.title || ''}`);
       });
       return paragraphs;
     }
@@ -1378,117 +1365,12 @@ function stepWriteParagraphs(dataStr, filePath) {
   if (!Array.isArray(paragraphs) || paragraphs.length === 0) {
     console.error('❌ 段落数组为空或格式错误'); process.exit(1);
   }
-  for (const p of paragraphs) {
-    if (typeof p.screenshot_at !== 'number' || p.screenshot_at < p.start || p.screenshot_at > p.end) {
-      p.screenshot_at = parseFloat((p.start + (p.end - p.start) * 0.6).toFixed(1));
-    }
-    p.screenshot_at = parseFloat(p.screenshot_at.toFixed(1));
-  }
   fs.mkdirSync(path.dirname(PARAGRAPHS_PATH), { recursive: true });
   fs.writeFileSync(PARAGRAPHS_PATH, JSON.stringify(paragraphs, null, 2), 'utf-8');
   console.log(`✅ paragraphs.json 已写入 ${PARAGRAPHS_PATH}，共 ${paragraphs.length} 段`);
   paragraphs.forEach((p, i) => {
-    console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | 截图@${fmtTime(p.screenshot_at)} | ${p.summary || p.title || ''}`);
+    console.log(`  [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} | ${p.summary || p.title || ''}`);
   });
-}
-
-// ══════════════════════════════════════
-//  STEP 4.5: AI 文字优化（可选，截帧后、组装 markdown 前）
-// ══════════════════════════════════════
-/**
- * 打印段落内容供主 AI 优化，并提示主 AI 将优化后结果写回 paragraphs.json。
- *
- * 优化目标：
- *   1. 修正 Whisper 转录错误（同音字替换、专有名词、英文大小写）
- *      - 常见错误：Cloud → Claude、Starik → Strik（按实际情况修正）
- *      - 专业术语统一：skill / hook / gotchas / config.json 等保持英文
- *   2. 补全因口语省略导致的逻辑断裂
- *   3. 修正明显的错别字
- *   4. 不改变原意，不润色成"AI 感"文风
- *
- * 主 AI 完成优化后，直接将修改后的 paragraphs.json 写回原路径即可。
- */
-async function stepPolish(paragraphsPath) {
-  console.log('\n✏️ [Step 4.5] AI 文字优化：读取段落内容，请主 AI 修正转录错误\n');
-
-  if (!fs.existsSync(paragraphsPath)) {
-    console.error('❌ 未找到 paragraphs.json，请先完成 analyze 步骤');
-    process.exit(1);
-  }
-
-  const paragraphs = JSON.parse(fs.readFileSync(paragraphsPath, 'utf-8'));
-
-  console.log(`📄 共 ${paragraphs.length} 段，以下是当前文案内容：\n`);
-  paragraphs.forEach((p, i) => {
-    console.log(`━━━ 段落 [${i + 1}] ${fmtTime(p.start)}~${fmtTime(p.end)} ━━━`);
-    console.log(`摘要：${p.summary || p.title || '（无）'}`);
-    console.log(`文案：\n${p.text || p.content || ''}`);
-    console.log('');
-  });
-
-  console.log(`
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-📌 主 AI 任务（文字优化）：
-   1. 阅读以上各段文案，找出 Whisper 转录错误：
-      · 同音字替换（如 Cloud → Claude、工具名称、人名）
-      · 专有名词错误（保持英文原词：skill, hook, gotchas, Config.json 等）
-      · 口语省略导致的逻辑断裂（适度补全，不改变原意）
-      · 明显错别字
-   2. 修改完毕后，直接将完整的 paragraphs.json 写回：
-      ${paragraphsPath}
-   3. 写回后执行：
-      node video_to_joyspace.js --step write-paragraphs --file ${paragraphsPath}
-      验证内容是否正确保存。
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-`);
-
-  return paragraphs;
-}
-
-
-async function stepFrames(videoPath, paragraphsPath, framesDir) {
-  console.log('\n🎞️ [Step 4] 精准截帧（按 AI 指定时间点）...');
-
-  if (!commandExists('ffmpeg')) {
-    console.error('❌ ffmpeg 未安装！请运行：brew install ffmpeg');
-    process.exit(1);
-  }
-
-  // 使用传入的 framesDir（自动解析或手动指定）
-  const _framesDir = framesDir || FRAMES_DIR;
-  const paragraphs = JSON.parse(fs.readFileSync(paragraphsPath, 'utf-8'));
-  fs.mkdirSync(_framesDir, { recursive: true });
-
-  const results = [];
-
-  for (let i = 0; i < paragraphs.length; i++) {
-    const p = paragraphs[i];
-    if (typeof p.screenshot_at !== 'number') continue;
-
-    const sec = p.screenshot_at;
-    const outPath = path.join(_framesDir, `frame_p${String(i + 1).padStart(2, '0')}_${Math.round(sec)}s.jpg`);
-
-    try {
-      execFileSync(
-        'ffmpeg',
-        ['-y', '-ss', String(sec), '-i', videoPath, '-frames:v', '1', '-q:v', '3', '-vf', 'scale=1280:-2', outPath],
-        { stdio: 'pipe' }
-      );
-      console.log(`  ✅ 段落[${i + 1}] 截图@${fmtTime(sec)} → ${path.basename(outPath)}`);
-      results.push({ paragraphIdx: i, time: sec, path: outPath });
-    } catch (e) {
-      console.warn(`  ⚠️ 段落[${i + 1}] 截帧失败（@${fmtTime(sec)}）:`, e.message);
-    }
-  }
-
-  // 保存截帧索引（写入到 paragraphs.json 中，方便 write 步骤直接使用）
-  for (const r of results) {
-    paragraphs[r.paragraphIdx].frame_path = r.path;
-  }
-  fs.writeFileSync(paragraphsPath, JSON.stringify(paragraphs, null, 2), 'utf-8');
-
-  console.log(`\n✅ 截帧完成，共 ${results.length} 张 → ${_framesDir}`);
-  return results;
 }
 
 // ══════════════════════════════════════
