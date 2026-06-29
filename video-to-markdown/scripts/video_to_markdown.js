@@ -69,6 +69,12 @@ const YTDLP_COOKIES = getArg('--ytdlp-cookies') || process.env.YTDLP_COOKIES || 
 const YTDLP_COOKIES_FROM_BROWSER = getArg('--ytdlp-cookies-from-browser')
   || process.env.YTDLP_COOKIES_FROM_BROWSER
   || dotenv.YTDLP_COOKIES_FROM_BROWSER;
+// Whisper 模型：可传名称（small/medium…）或本地模型目录路径。
+// 受限网络下可先用镜像把模型下到本地目录，再用 WHISPER_MODEL=/path/to/model 指向它。
+const WHISPER_MODEL = getArg('--whisper-model')
+  || process.env.WHISPER_MODEL
+  || dotenv.WHISPER_MODEL
+  || 'small';
 const BROWSER_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const YTDLP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -1078,7 +1084,7 @@ from faster_whisper import WhisperModel
 chunks = ${JSON.stringify(pyChunks)}
 json_path = ${JSON.stringify(jsonOut)}
 
-model = WhisperModel("small", device="cpu", compute_type="int8")
+model = WhisperModel(${JSON.stringify(WHISPER_MODEL)}, device="cpu", compute_type="int8")
 all_segments = []
 
 for i, ch in enumerate(chunks):
@@ -1175,7 +1181,7 @@ from faster_whisper import WhisperModel
 audio_path = ${JSON.stringify(audioPath)}
 json_path = ${JSON.stringify(jsonPath)}
 
-model = WhisperModel("small", device="cpu", compute_type="int8")
+model = WhisperModel(${JSON.stringify(WHISPER_MODEL)}, device="cpu", compute_type="int8")
 segments, _ = model.transcribe(audio_path, language="zh", vad_filter=True, beam_size=5)
 data = {"segments": []}
 for s in segments:
@@ -1498,6 +1504,8 @@ async function main() {
   YTDLP_COOKIES             yt-dlp cookies.txt 路径
   YTDLP_COOKIES_FROM_BROWSER  从浏览器读取 cookies，例如 chrome
   TRANSCRIBE_CHUNK_SEC      转录分段阈值（秒，默认 600）
+  WHISPER_MODEL             Whisper 模型名称或本地模型目录（默认 small）；受限网络可指向本地目录
+  HF_ENDPOINT               HuggingFace 镜像，如 https://hf-mirror.com（首次下载模型用）
   CLEAN_OLD_WORK_DIRS       新任务启动时是否清理旧 /tmp/douyin_task_* 目录（默认 1）
     `);
   }
