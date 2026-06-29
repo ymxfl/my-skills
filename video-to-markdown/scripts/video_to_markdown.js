@@ -464,15 +464,15 @@ function checkDependencies(strict = true) {
     console.log('  ❌ faster-whisper  未安装');
   }
 
-  // ── 多平台下载依赖 ─────────────────────────────────
+  // ── 多平台下载依赖（可选，仅 B站/微博/小红书需要）────
+  // 不自动安装：抖音/快手用内置解析器即可；yt-dlp 经 brew 安装较慢且会触发自更新，
+  // 不应阻塞只处理抖音的常见场景。仅检测并提示，需要时由用户自行安装。
   if (commandExists('yt-dlp')) {
     const v = (() => { try { return execFileSync('yt-dlp', ['--version'], { stdio: 'pipe' }).toString().trim(); } catch { return ''; } })();
     console.log(`  ✅ yt-dlp  ${v}（B站/微博/小红书下载依赖）`);
-  } else if (tryAutoInstall('brew', 'yt-dlp')) {
-    console.log('  ✅ yt-dlp  已自动安装');
   } else {
     optional.push('yt-dlp');
-    console.log('  ⚠️  yt-dlp 未安装：抖音/快手可用；B站/微博/小红书需要安装 yt-dlp');
+    console.log('  ⚠️  yt-dlp 未安装：抖音/快手可用；B站/微博/小红书需先安装（brew install yt-dlp）');
   }
 
   // ── 打印汇总 ───────────────────────────────────────

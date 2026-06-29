@@ -15,7 +15,9 @@ node scripts/video_to_markdown.js --step check
 
 Tell the user the key results: dependency status, local transcription availability, and `TRANSCRIBE_CHUNK_SEC`.
 
-**首次运行全自动**：`check` 步骤会自动安装缺失依赖（`faster-whisper`、`requests` 走 pip；`ffmpeg`、`yt-dlp` 走 brew）。转录时若本地无模型，脚本会自动通过镜像（默认 `https://hf-mirror.com`）把 faster-whisper `small` 模型（约 480MB）下载到 `~/.cache/video-to-markdown/`，并离线加载——新用户无需任何手动配置即可跑通。
+**首次运行全自动**：`check` 步骤会自动安装缺失的**必需**依赖（`faster-whisper`、`requests` 走 pip；`ffmpeg` 走 brew）。转录时若本地无模型，脚本会自动通过镜像（默认 `https://hf-mirror.com`）把 faster-whisper `small` 模型（约 480MB）下载到 `~/.cache/video-to-markdown/`，并离线加载——新用户无需任何手动配置即可跑通。
+
+`yt-dlp` 是**可选**依赖（仅 B站/微博/小红书需要；抖音/快手用内置解析器），不会自动安装——需要时用 `brew install yt-dlp` 自行安装即可。
 
 可选覆盖：
 
