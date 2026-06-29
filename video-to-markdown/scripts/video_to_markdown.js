@@ -27,6 +27,7 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 
@@ -70,11 +71,17 @@ const YTDLP_COOKIES_FROM_BROWSER = getArg('--ytdlp-cookies-from-browser')
   || process.env.YTDLP_COOKIES_FROM_BROWSER
   || dotenv.YTDLP_COOKIES_FROM_BROWSER;
 // Whisper 模型：可传名称（small/medium…）或本地模型目录路径。
-// 受限网络下可先用镜像把模型下到本地目录，再用 WHISPER_MODEL=/path/to/model 指向它。
+// 不传时默认 small，并自动通过镜像下到用户缓存目录，首次运行即可离线转录。
 const WHISPER_MODEL = getArg('--whisper-model')
   || process.env.WHISPER_MODEL
   || dotenv.WHISPER_MODEL
   || 'small';
+// HuggingFace 镜像（首次下载模型用）。默认走 hf-mirror.com，受限网络也能拉到模型。
+const HF_MIRROR = process.env.HF_ENDPOINT
+  || dotenv.HF_ENDPOINT
+  || 'https://hf-mirror.com';
+// 自动管理的模型缓存根目录。
+const MODEL_CACHE_ROOT = path.join(os.homedir(), '.cache', 'video-to-markdown');
 const BROWSER_UA = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
 const YTDLP_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
 
@@ -314,6 +321,73 @@ function pythonModuleExists(moduleName) {
 }
 
 /**
+ * 尝试自动安装一个依赖。返回 true=安装后已可用。
+ * pip 包用 python3 -m pip 安装；命令行工具优先 brew（macOS），失败时回退提示。
+ */
+function tryAutoInstall(kind, name) {
+  try {
+    if (kind === 'pip') {
+      console.log(`  ⬇️  正在自动安装 Python 包：${name} ...`);
+      execFileSync('python3', ['-m', 'pip', 'install', '--user', name], { stdio: 'inherit' });
+      return pythonModuleExists(name === 'faster-whisper' ? 'faster_whisper' : name);
+    }
+    if (kind === 'brew') {
+      if (!commandExists('brew')) {
+        console.log(`  ⚠️  未检测到 Homebrew，无法自动安装 ${name}`);
+        return false;
+      }
+      console.log(`  ⬇️  正在自动安装：${name}（brew install ${name}）...`);
+      execFileSync('brew', ['install', name], { stdio: 'inherit' });
+      return commandExists(name);
+    }
+  } catch (e) {
+    console.log(`  ⚠️  自动安装 ${name} 失败：${e.message}`);
+  }
+  return false;
+}
+
+/**
+ * 确保 faster-whisper small 模型在本地缓存目录就绪；不在则通过镜像下载。
+ * 返回本地模型目录路径（供 WhisperModel 直接加载，无需联网）。
+ * 若 WHISPER_MODEL 已是存在的目录或非 small 名称，则原样返回、不接管。
+ */
+function ensureWhisperModel() {
+  // 用户显式指定了本地目录 → 直接用
+  if (WHISPER_MODEL !== 'small') {
+    return WHISPER_MODEL;
+  }
+  const modelDir = path.join(MODEL_CACHE_ROOT, 'faster-whisper-small');
+  const required = ['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'];
+  const ready = required.every(f => {
+    const p = path.join(modelDir, f);
+    try { return fs.existsSync(p) && fs.statSync(p).size > 0; } catch { return false; }
+  });
+  if (ready) {
+    console.log(`  ✅ 模型已就绪（本地缓存）：${modelDir}`);
+    return modelDir;
+  }
+
+  console.log(`  ⬇️  首次运行：通过镜像下载 faster-whisper small 模型（约 480MB）...`);
+  console.log(`     镜像：${HF_MIRROR}`);
+  fs.mkdirSync(modelDir, { recursive: true });
+  const base = `${HF_MIRROR}/Systran/faster-whisper-small/resolve/main`;
+  const files = ['config.json', 'model.bin', 'tokenizer.json', 'vocabulary.txt'];
+  for (const f of files) {
+    const out = path.join(modelDir, f);
+    if (fs.existsSync(out) && fs.statSync(out).size > 0) continue;
+    console.log(`     下载 ${f} ...`);
+    execFileSync('curl', ['-sL', '--fail', '--max-time', '600', '-o', out, `${base}/${f}`], { stdio: 'inherit' });
+  }
+  // 校验大文件确实下全
+  const modelBin = path.join(modelDir, 'model.bin');
+  if (!fs.existsSync(modelBin) || fs.statSync(modelBin).size < 100 * 1024 * 1024) {
+    throw new Error(`模型下载不完整：${modelBin}。请检查网络或改用 HF_ENDPOINT 指定其他镜像。`);
+  }
+  console.log(`  ✅ 模型下载完成：${modelDir}`);
+  return modelDir;
+}
+
+/**
  * 运行完整的依赖检测，缺少依赖时打印安装引导
  * @param {boolean} strict - true=缺少必要依赖时直接退出
  * @returns {{ ok: boolean, missing: string[], optional: string[] }}
@@ -339,10 +413,12 @@ function checkDependencies(strict = true) {
     warnings.push('无法检测 Node.js 版本');
   }
 
-  // ffmpeg（音频提取 + 截帧）
+  // ffmpeg（音频提取）
   if (commandExists('ffmpeg')) {
     const v = (() => { try { return execFileSync('ffmpeg', ['-version'], { stdio: 'pipe' }).toString().split('\n')[0].trim(); } catch { return '（版本未知）'; } })();
     console.log(`  ✅ ffmpeg  ${v}`);
+  } else if (tryAutoInstall('brew', 'ffmpeg')) {
+    console.log('  ✅ ffmpeg  已自动安装');
   } else {
     missing.push('ffmpeg');
     console.log('  ❌ ffmpeg  未安装');
@@ -358,20 +434,27 @@ function checkDependencies(strict = true) {
       execFileSync('python3', ['-c', 'import requests'], { stdio: 'pipe' });
       console.log('  ✅ python3-requests  已安装');
     } catch {
-      missing.push('python3-requests');
-      console.log('  ❌ python3-requests  未安装');
+      if (tryAutoInstall('pip', 'requests')) {
+        console.log('  ✅ python3-requests  已自动安装');
+      } else {
+        missing.push('python3-requests');
+        console.log('  ❌ python3-requests  未安装');
+      }
     }
   } else {
     missing.push('python3');
     console.log('  ❌ python3  未安装');
   }
 
-  // ── 转录依赖（本地，二选一）────────────────────────
-  const hasFasterWhisper = commandExists('python3') && pythonModuleExists('faster_whisper');
+  // ── 转录依赖（本地）────────────────────────────────
+  let hasFasterWhisper = commandExists('python3') && pythonModuleExists('faster_whisper');
   const hasLocalWhisper = commandExists('whisper');
 
   if (hasFasterWhisper) {
     console.log('  ✅ faster-whisper（本地）  已安装');
+  } else if (commandExists('python3') && tryAutoInstall('pip', 'faster-whisper')) {
+    hasFasterWhisper = true;
+    console.log('  ✅ faster-whisper（本地）  已自动安装');
   } else if (hasLocalWhisper) {
     const v = (() => { try { return execFileSync('whisper', ['--version'], { stdio: 'pipe' }).toString().trim().split('\n')[0]; } catch { return ''; } })();
     console.log(`  ⚠️  faster-whisper 未安装，检测到 whisper（本地）  ${v}`);
@@ -385,6 +468,8 @@ function checkDependencies(strict = true) {
   if (commandExists('yt-dlp')) {
     const v = (() => { try { return execFileSync('yt-dlp', ['--version'], { stdio: 'pipe' }).toString().trim(); } catch { return ''; } })();
     console.log(`  ✅ yt-dlp  ${v}（B站/微博/小红书下载依赖）`);
+  } else if (tryAutoInstall('brew', 'yt-dlp')) {
+    console.log('  ✅ yt-dlp  已自动安装');
   } else {
     optional.push('yt-dlp');
     console.log('  ⚠️  yt-dlp 未安装：抖音/快手可用；B站/微博/小红书需要安装 yt-dlp');
@@ -1003,6 +1088,27 @@ async function stepTranscribe(audioPath) {
     process.exit(1);
   }
 
+  // 确保 faster-whisper 已安装（缺失则自动安装）
+  if (!pythonModuleExists('faster_whisper') && !commandExists('whisper')) {
+    console.log('  faster-whisper 未安装，尝试自动安装 ...');
+    tryAutoInstall('pip', 'faster-whisper');
+  }
+  // 确保模型就绪（首次运行通过镜像下到用户缓存目录），并强制离线加载，避免触网卡顿
+  let resolvedModel = WHISPER_MODEL;
+  const transcribeEnv = { ...process.env, KMP_DUPLICATE_LIB_OK: 'TRUE' };
+  if (pythonModuleExists('faster_whisper')) {
+    try {
+      resolvedModel = ensureWhisperModel();
+      // 指向本地目录时离线加载，永不触网
+      if (resolvedModel !== WHISPER_MODEL || resolvedModel.includes('/')) {
+        transcribeEnv.HF_HUB_OFFLINE = '1';
+      }
+    } catch (e) {
+      console.warn('  ⚠️  模型自动下载失败：', e.message);
+      console.warn('     将回退到 faster-whisper 默认下载逻辑。');
+    }
+  }
+
   let segments = [];
 
   // 分段阈值（秒）
@@ -1084,7 +1190,7 @@ from faster_whisper import WhisperModel
 chunks = ${JSON.stringify(pyChunks)}
 json_path = ${JSON.stringify(jsonOut)}
 
-model = WhisperModel(${JSON.stringify(WHISPER_MODEL)}, device="cpu", compute_type="int8")
+model = WhisperModel(${JSON.stringify(resolvedModel)}, device="cpu", compute_type="int8")
 all_segments = []
 
 for i, ch in enumerate(chunks):
@@ -1107,7 +1213,7 @@ with open(json_path, "w", encoding="utf-8") as f:
     json.dump({"segments": all_segments}, f, ensure_ascii=False, indent=2)
 `;
         fs.writeFileSync(tmpScript, pyCode, 'utf-8');
-        runFile('python3', [tmpScript], { env: { ...process.env, KMP_DUPLICATE_LIB_OK: 'TRUE' } });
+        runFile('python3', [tmpScript], { env: transcribeEnv });
         if (!fs.existsSync(jsonOut)) throw new Error('未找到输出 JSON: ' + jsonOut);
         const result = JSON.parse(fs.readFileSync(jsonOut, 'utf-8'));
         segments = (result.segments || []).map(s => ({
@@ -1181,7 +1287,7 @@ from faster_whisper import WhisperModel
 audio_path = ${JSON.stringify(audioPath)}
 json_path = ${JSON.stringify(jsonPath)}
 
-model = WhisperModel(${JSON.stringify(WHISPER_MODEL)}, device="cpu", compute_type="int8")
+model = WhisperModel(${JSON.stringify(resolvedModel)}, device="cpu", compute_type="int8")
 segments, _ = model.transcribe(audio_path, language="zh", vad_filter=True, beam_size=5)
 data = {"segments": []}
 for s in segments:
@@ -1198,7 +1304,7 @@ with open(json_path, "w", encoding="utf-8") as f:
     json.dump(data, f, ensure_ascii=False, indent=2)
 `;
         fs.writeFileSync(tmpScript, pyCode, 'utf-8');
-        runFile('python3', [tmpScript], { env: { ...process.env, KMP_DUPLICATE_LIB_OK: 'TRUE' } });
+        runFile('python3', [tmpScript], { env: transcribeEnv });
         if (!fs.existsSync(jsonPath)) throw new Error('未找到输出 JSON: ' + jsonPath);
         const result = JSON.parse(fs.readFileSync(jsonPath, 'utf-8'));
         segments = (result.segments || []).map(s => ({
@@ -1504,8 +1610,8 @@ async function main() {
   YTDLP_COOKIES             yt-dlp cookies.txt 路径
   YTDLP_COOKIES_FROM_BROWSER  从浏览器读取 cookies，例如 chrome
   TRANSCRIBE_CHUNK_SEC      转录分段阈值（秒，默认 600）
-  WHISPER_MODEL             Whisper 模型名称或本地模型目录（默认 small）；受限网络可指向本地目录
-  HF_ENDPOINT               HuggingFace 镜像，如 https://hf-mirror.com（首次下载模型用）
+  WHISPER_MODEL             Whisper 模型名称或本地模型目录（默认 small，自动下到 ~/.cache/video-to-markdown/）
+  HF_ENDPOINT               模型下载镜像（默认 https://hf-mirror.com）
   CLEAN_OLD_WORK_DIRS       新任务启动时是否清理旧 /tmp/douyin_task_* 目录（默认 1）
     `);
   }

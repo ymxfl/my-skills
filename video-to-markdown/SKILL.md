@@ -15,18 +15,13 @@ node scripts/video_to_markdown.js --step check
 
 Tell the user the key results: dependency status, local transcription availability, and `TRANSCRIBE_CHUNK_SEC`.
 
-转录使用本地 faster-whisper，首次运行会从 HuggingFace 下载模型（默认 `small`，约 480MB）。若网络受限：
+**首次运行全自动**：`check` 步骤会自动安装缺失依赖（`faster-whisper`、`requests` 走 pip；`ffmpeg`、`yt-dlp` 走 brew）。转录时若本地无模型，脚本会自动通过镜像（默认 `https://hf-mirror.com`）把 faster-whisper `small` 模型（约 480MB）下载到 `~/.cache/video-to-markdown/`，并离线加载——新用户无需任何手动配置即可跑通。
 
-- 设置镜像：`HF_ENDPOINT=https://hf-mirror.com`
-- 或先把模型下到本地目录，再用 `WHISPER_MODEL=/path/to/model` 指向它（配合 `HF_HUB_OFFLINE=1` 完全离线）。例如：
-  ```bash
-  MODELDIR=/tmp/fw-small-model; mkdir -p $MODELDIR
-  BASE=https://hf-mirror.com/Systran/faster-whisper-small/resolve/main
-  for f in config.json model.bin tokenizer.json vocabulary.txt preprocessor_config.json; do
-    curl -sL -o "$MODELDIR/$f" "$BASE/$f"
-  done
-  HF_HUB_OFFLINE=1 WHISPER_MODEL=$MODELDIR node scripts/video_to_markdown.js --step transcribe --work-dir "$WORK"
-  ```
+可选覆盖：
+
+- `HF_ENDPOINT=https://其他镜像` —— 换模型下载镜像。
+- `WHISPER_MODEL=small`（默认）或 `WHISPER_MODEL=/path/to/model` —— 指定模型名或本地模型目录。
+- brew/pip 自动安装失败时（无权限或离线），`check` 会打印手动安装命令。
 
 
 Use one `--work-dir` for every step in a run. Prefer an explicit task directory such as `/tmp/video_to_markdown_task`. The current task directory is kept after completion; old `/tmp/douyin_task_*` directories are cleaned only when a new download/full task starts unless `--no-cleanup-old` or `CLEAN_OLD_WORK_DIRS=0` is set.
